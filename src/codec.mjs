@@ -2,7 +2,9 @@
 // Fonctionne dans Node (>=20) et dans le navigateur : utilise globalThis.crypto.
 import { LISTS, GLUE } from "./wordlist.mjs";
 
-const SALT = new TextEncoder().encode("papotage-v1-salt");
+const ENC = new TextEncoder();
+const DEC = new TextDecoder();
+const SALT = ENC.encode("papotage-v1-salt");
 const ITER = 200_000;
 const NONCE_LEN = 4;      // octets transmis ; complétés à 12 pour l'IV GCM (garde les phrases courtes)
 const TAG_BITS = 64;      // tag GCM tronqué (compromis taille/sécurité casual)
@@ -25,7 +27,7 @@ function deriveKey(passphrase) {
     if (key) return key;
     key = (async () => {
         const base = await crypto.subtle.importKey(
-            "raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]
+            "raw", ENC.encode(passphrase), "PBKDF2", false, ["deriveKey"]
         );
         return crypto.subtle.deriveKey(
             { name: "PBKDF2", salt: SALT, iterations: ITER, hash: "SHA-256" },
@@ -46,7 +48,7 @@ async function encryptBytes(text, passphrase) {
     const ct = new Uint8Array(await crypto.subtle.encrypt(
         { name: "AES-GCM", iv: ivFromNonce(nonce), tagLength: TAG_BITS },
         key,
-        new TextEncoder().encode(text)
+        ENC.encode(text)
     ));
     const out = new Uint8Array(nonce.length + ct.length);
     out.set(nonce, 0);
@@ -61,7 +63,7 @@ async function decryptBytes(bytes, passphrase) {
     const pt = await crypto.subtle.decrypt(
         { name: "AES-GCM", iv: ivFromNonce(nonce), tagLength: TAG_BITS }, key, ct
     );
-    return new TextDecoder().decode(pt);
+    return DEC.decode(pt);
 }
 
 // --- Octets <-> phrases -----------------------------------------------------
@@ -142,9 +144,13 @@ export async function decode(sentences, passphrase) {
 // Mode caché (zero-width) : court + invisible, recommandé pour Discord.
 // Message envoyé = [couverture visible] + MARK + [payload invisible].
 // ===========================================================================
-const MARK = "⁠"; // word-joiner : délimiteur invisible début de payload
-const ZERO = "‌"; // ZWNJ = bit 0
-const ONE  = "‍"; // ZWJ  = bit 1
+// Alphabet zero-width : 4 symboles = 2 bits par caractère (2x plus court qu'en
+// binaire). Les 4 sont préservés par Discord. Le word-joiner sert à la fois de
+// valeur 3 et de délimiteur : comme il n'apparaît jamais dans une couverture, le
+// PREMIER word-joiner du message marque sans ambiguïté le début du payload.
+const ZW = ["​", "‌", "‍", "⁠"]; // valeurs 0, 1, 2, 3
+const ZW_VAL = new Map(ZW.map((c, i) => [c, i]));
+const MARK = "⁠"; // = ZW[3]
 
 const COVERS = ["ok", "mdr", "👍", "ah ouais", "mouais", "jsp", "wsh", "nan mais", "🤙", "hmm"];
 
@@ -190,7 +196,7 @@ export async function encodeHidden(text, passphrase, cover) {
     const bytes = await encryptBytes(text, passphrase);
     let zw = "";
     for (const byte of bytes)
-        for (let b = 7; b >= 0; b--) zw += (byte >> b) & 1 ? ONE : ZERO;
+        zw += ZW[(byte >> 6) & 3] + ZW[(byte >> 4) & 3] + ZW[(byte >> 2) & 3] + ZW[byte & 3];
     return pickNaturalCover(cover) + MARK + zw;
 }
 
@@ -198,22 +204,18 @@ export async function encodeHidden(text, passphrase, cover) {
 export async function decodeHidden(message, passphrase) {
     const at = message.indexOf(MARK);
     if (at < 0) return null;
-    const payload = message.slice(at + 1);
-    const bits = [];
-    for (const ch of payload) {
-        if (ch === ZERO) bits.push(0);
-        else if (ch === ONE) bits.push(1);
-        else return null; // caractère parasite => pas un payload propre
+    const vals = [];
+    for (const ch of message.slice(at + 1)) {
+        const v = ZW_VAL.get(ch);
+        if (v === undefined) return null; // caractère parasite => pas un payload propre
+        vals.push(v);
     }
-    if (bits.length === 0 || bits.length % 8 !== 0) return null;
-    const bytes = [];
-    for (let i = 0; i < bits.length; i += 8) {
-        let v = 0;
-        for (let k = 0; k < 8; k++) v = (v << 1) | bits[i + k];
-        bytes.push(v);
-    }
+    if (vals.length === 0 || vals.length % 4 !== 0) return null;
+    const bytes = new Uint8Array(vals.length / 4);
+    for (let i = 0; i < bytes.length; i++)
+        bytes[i] = (vals[i * 4] << 6) | (vals[i * 4 + 1] << 4) | (vals[i * 4 + 2] << 2) | vals[i * 4 + 3];
     try {
-        return await decryptBytes(new Uint8Array(bytes), passphrase);
+        return await decryptBytes(bytes, passphrase);
     } catch {
         return null;
     }
