@@ -86,9 +86,10 @@ const PapotageButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
     );
 };
 
-// Emojis du mode emoji : sert de filtre rapide (un message sans marqueur ni
-// emoji du dico n'est pas chiffré, on évite tout travail de décodage).
-const EMOJI_RE = /[😀😂😅😍🤔😎😭😡👍🔥🎉💀👀🚀🍕💯]/u;
+// Filtre rapide du mode emoji. Un vrai payload emoji est une longue suite
+// d'emojis du dico (2 par octet, donc des dizaines) ; on exige un run pour ne PAS
+// lancer le décodage sur un message normal qui contient juste un 😂 ou un 👍.
+const EMOJI_RUN_RE = /[😀😂😅😍🤔😎😭😡👍🔥🎉💀👀🚀🍕💯]{16,}/u;
 const inFlight = new Set<string>(); // messages en cours de déchiffrement (anti-doublon)
 
 // --- Déchiffrement : remplace le contenu affiché par le vrai message ---------
@@ -98,7 +99,7 @@ async function tryDecrypt(channelId: string, messageId: string, content: string)
     if (!pass || !content) return;
 
     const hasMark = content.includes(MARK);
-    if (!hasMark && !EMOJI_RE.test(content)) return; // clairement pas chiffré
+    if (!hasMark && !EMOJI_RUN_RE.test(content)) return; // clairement pas chiffré
     if (inFlight.has(messageId)) return;
 
     inFlight.add(messageId);
