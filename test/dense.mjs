@@ -6,6 +6,18 @@ const check = async (n, f) => { try { await f(); console.log("✅", n); ok++; } 
 const assert = (c, m) => { if (!c) throw new Error(m || "assertion"); };
 const visible = s => s.replace(/[​‌‍⁠︀-️]/g, "").replace(/[\u{e0100}-\u{e01ef}]/gu, "");
 
+// Texte haute-entropie (LCG déterministe) : la compression ne mord pas dessus,
+// donc les gros messages restent gros et exercent réellement le découpage.
+function incompressible(n) {
+    const abc = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?";
+    let s = "", x = 0x9e3779b9 >>> 0;
+    for (let i = 0; i < n; i++) {
+        x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+        s += abc[(x >>> 16) % abc.length];
+    }
+    return s;
+}
+
 // Simule la réception : recolle les morceaux et déchiffre
 async function receive(parts) {
     const buf = {};
@@ -44,7 +56,7 @@ await check("message de 850 caractères tient en 1 message", async () => {
 });
 
 await check("message très long = découpé et recollé", async () => {
-    const clair = "Lorem ipsum dolor sit amet consectetur. ".repeat(120).trim(); // ~4700 car.
+    const clair = incompressible(4700); // haute-entropie -> ne compresse pas
     const parts = await encodeMulti(clair, PASS);
     console.log(`   ${clair.length} car. -> ${parts.length} messages (chacun < 2000)`);
     assert(parts.length > 1, "devrait être découpé");
@@ -53,8 +65,9 @@ await check("message très long = découpé et recollé", async () => {
 });
 
 await check("morceaux reçus dans le désordre", async () => {
-    const clair = "x".repeat(3000);
+    const clair = incompressible(3000); // force plusieurs morceaux à recoller
     const parts = await encodeMulti(clair, PASS);
+    assert(parts.length > 1, `un seul morceau (${parts.length}), le test ne teste rien`);
     const shuffled = [...parts].reverse();
     assert(await receive(shuffled) === clair);
 });
@@ -93,7 +106,7 @@ await check("couverture avec emoji (VS légitime) => décodage OK quand même", 
 });
 
 await check("couvertures variées entre les morceaux d'un long message", async () => {
-    const parts = await encodeMulti("z".repeat(2500), PASS);
+    const parts = await encodeMulti(incompressible(2500), PASS);
     const covers = new Set(parts.map(visible));
     console.log(`   ${parts.length} morceaux, ${covers.size} couvertures différentes`);
     assert(covers.size > 1, "les couvertures devraient varier");

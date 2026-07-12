@@ -16,6 +16,32 @@ function ivFromNonce(nonce4) {
 }
 const BITS_PER_WORD = 5;  // chaque liste = 32 mots = 5 bits
 
+// --- Compression (deflate-raw) ----------------------------------------------
+// Réduit la taille du payload : chaque octet économisé = 4 caractères invisibles
+// en moins dans Discord. Format "raw" (sans en-tête zlib) pour ne rien gaspiller.
+// La compression n'est appliquée que si elle réduit vraiment la taille ; le
+// drapeau voyage dans le bit de poids fort du nonce -> aucun octet d'overhead.
+async function pipeThrough(stream, bytes) {
+    const writer = stream.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    const reader = stream.readable.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        total += value.length;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    return out;
+}
+const deflate = bytes => pipeThrough(new CompressionStream("deflate-raw"), bytes);
+const inflate = bytes => pipeThrough(new DecompressionStream("deflate-raw"), bytes);
+
 // --- Dérivation de clé (PBKDF2 -> AES-GCM 256) ------------------------------
 // PBKDF2 200k itérations coûte ~50-100 ms : on met la clé en cache par mot de
 // passe (le sel est fixe, donc la clé est déterministe). Déchiffrer un salon
@@ -49,11 +75,17 @@ export function warmKey(passphrase) {
 // --- Chiffrement : texte -> octets (iv || ciphertext+tag) -------------------
 async function encryptBytes(text, passphrase) {
     const key = await deriveKey(passphrase);
+    const raw = ENC.encode(text);
+    const packed = await deflate(raw);
+    const zipped = packed.length < raw.length; // ne compresse que si ça aide vraiment
+    const plain = zipped ? packed : raw;
+
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
+    nonce[0] = (nonce[0] & 0x7f) | (zipped ? 0x80 : 0); // bit de poids fort = drapeau compression
     const ct = new Uint8Array(await crypto.subtle.encrypt(
         { name: "AES-GCM", iv: ivFromNonce(nonce), tagLength: TAG_BITS },
         key,
-        ENC.encode(text)
+        plain
     ));
     const out = new Uint8Array(nonce.length + ct.length);
     out.set(nonce, 0);
@@ -65,10 +97,16 @@ async function decryptBytes(bytes, passphrase) {
     const key = await deriveKey(passphrase);
     const nonce = bytes.slice(0, NONCE_LEN);
     const ct = bytes.slice(NONCE_LEN);
-    const pt = await crypto.subtle.decrypt(
+    const zipped = (nonce[0] & 0x80) !== 0; // drapeau lu dans le nonce (déjà authentifié par le tag)
+    const pt = new Uint8Array(await crypto.subtle.decrypt(
         { name: "AES-GCM", iv: ivFromNonce(nonce), tagLength: TAG_BITS }, key, ct
-    );
-    return DEC.decode(pt);
+    ));
+    if (!zipped) return DEC.decode(pt);
+    try {
+        return DEC.decode(await inflate(pt));
+    } catch {
+        return DEC.decode(pt); // repli : ancien message dont le bit aléatoire valait 1
+    }
 }
 
 // --- Octets <-> phrases -----------------------------------------------------

@@ -4,7 +4,7 @@
     "description": "Plugin Vencord qui chiffre les messages Discord et les cache dans du texte invisible ou des emojis.",
     "type": "module",
     "scripts": {
-        "test": "node test/roundtrip.mjs && node test/hidden.mjs && node test/dense.mjs && node test/emoji.mjs"
+        "test": "node test/roundtrip.mjs && node test/hidden.mjs && node test/dense.mjs && node test/emoji.mjs && node test/compress.mjs"
     },
     "author": "zefarie",
     "license": "MIT",
