@@ -45,6 +45,11 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Mode emoji : les emojis visibles portent le secret (visible mais codé, pour messages courts)",
         default: false
+    },
+    denseMode: {
+        type: OptionType.BOOLEAN,
+        description: "Encodage dense : ~33 % de caractères invisibles en moins (le contact doit avoir la même version du plugin)",
+        default: true
     }
 });
 
@@ -172,7 +177,7 @@ export default definePlugin({
 
             const encoded = settings.store.emojiMode
                 ? await encodeEmoji(secret, pass, chosenCover)
-                : await encodeHidden(secret, pass, chosenCover);
+                : await encodeHidden(secret, pass, chosenCover, settings.store.denseMode ? 3 : 2);
 
             // Discord rejette silencieusement > 2000 caractères : prévenir au lieu
             // de laisser le message ne pas partir sans explication.
