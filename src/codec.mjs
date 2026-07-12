@@ -187,13 +187,18 @@ export async function decode(sentences, passphrase) {
 // Mode caché (zero-width) : court + invisible, recommandé pour Discord.
 // Message envoyé = [couverture visible] + MARK + [payload invisible].
 // ===========================================================================
-// Alphabet zero-width : 4 symboles = 2 bits par caractère (2x plus court qu'en
-// binaire). Les 4 sont préservés par Discord. Le word-joiner sert à la fois de
-// valeur 3 et de délimiteur : comme il n'apparaît jamais dans une couverture, le
-// PREMIER word-joiner du message marque sans ambiguïté le début du payload.
-const ZW = ["​", "‌", "‍", "⁠"]; // valeurs 0, 1, 2, 3
-const ZW_VAL = new Map(ZW.map((c, i) => [c, i]));
-const MARK = "⁠"; // = ZW[3]
+// Alphabet zero-width extensible. Plus il y a de symboles, moins on envoie de
+// caractères : 4 symboles = 2 bits/car, 8 symboles = 3 bits/car (-33 %).
+// - index 0-3 : sûrs, préservés par Discord (ZWSP, ZWNJ, ZWJ, word-joiner).
+// - index 4-7 : opérateurs invisibles (même famille Cf que le word-joiner), très
+//   probablement préservés -> activés par la densité 3 bits.
+// Le word-joiner (index 3) sert aussi de délimiteur MARK : il n'apparaît jamais
+// dans une couverture, donc le PREMIER word-joiner marque le début du payload.
+// Juste après le MARK, un caractère d'en-tête code la densité (0 => 2 bits,
+// 1 => 3 bits) : le récepteur la détecte seul, rien à régler de son côté.
+const ZW_ALL = ["​", "‌", "‍", "⁠", "⁡", "⁢", "⁣", "⁤"];
+const ZW_VAL = new Map(ZW_ALL.map((c, i) => [c, i]));
+const MARK = "⁠"; // = ZW_ALL[3]
 
 const COVERS = ["ok", "mdr", "👍", "ah ouais", "mouais", "jsp", "wsh", "nan mais", "🤙", "hmm"];
 
@@ -235,30 +240,51 @@ function pickNaturalCover(custom) {
     return NATURAL_COVERS[randIndex(NATURAL_COVERS.length)];
 }
 
-export async function encodeHidden(text, passphrase, cover) {
+// `bits` = 2 (sûr, 4 symboles) ou 3 (dense, 8 symboles). Le flux d'octets est
+// ré-empaqueté en groupes de `bits` bits (pas d'alignement octet requis).
+export async function encodeHidden(text, passphrase, cover, bits = 2) {
+    if (bits !== 2 && bits !== 3) bits = 2;
     const bytes = await encryptBytes(text, passphrase);
-    let zw = "";
-    for (const byte of bytes)
-        zw += ZW[(byte >> 6) & 3] + ZW[(byte >> 4) & 3] + ZW[(byte >> 2) & 3] + ZW[byte & 3];
+    const mask = (1 << bits) - 1;
+    let zw = ZW_ALL[bits - 2]; // en-tête densité (0 => 2 bits, 1 => 3 bits)
+    let acc = 0, accBits = 0;
+    for (const byte of bytes) {
+        acc = (acc << 8) | byte;
+        accBits += 8;
+        while (accBits >= bits) {
+            accBits -= bits;
+            zw += ZW_ALL[(acc >> accBits) & mask];
+        }
+    }
+    if (accBits > 0) zw += ZW_ALL[(acc << (bits - accBits)) & mask]; // bits de fin (padding)
     return pickNaturalCover(cover) + MARK + zw;
 }
 
 // Renvoie le texte clair, ou null si pas de payload caché / mauvaise clé.
+// La densité est lue dans l'en-tête : le récepteur s'adapte tout seul.
 export async function decodeHidden(message, passphrase) {
     const at = message.indexOf(MARK);
     if (at < 0) return null;
-    const vals = [];
-    for (const ch of message.slice(at + 1)) {
-        const v = ZW_VAL.get(ch);
-        if (v === undefined) return null; // caractère parasite => pas un payload propre
-        vals.push(v);
+    const syms = [...message.slice(at + 1)];
+    const header = syms.length ? ZW_VAL.get(syms[0]) : undefined;
+    if (header === undefined || header > 1) return null; // densité inconnue
+    const bits = header + 2;
+    const alpha = 1 << bits;
+    let acc = 0, accBits = 0;
+    const bytes = [];
+    for (let i = 1; i < syms.length; i++) {
+        const v = ZW_VAL.get(syms[i]);
+        if (v === undefined || v >= alpha) return null; // parasite / mauvaise densité
+        acc = (acc << bits) | v;
+        accBits += bits;
+        if (accBits >= 8) {
+            accBits -= 8;
+            bytes.push((acc >> accBits) & 0xff);
+        }
     }
-    if (vals.length === 0 || vals.length % 4 !== 0) return null;
-    const bytes = new Uint8Array(vals.length / 4);
-    for (let i = 0; i < bytes.length; i++)
-        bytes[i] = (vals[i * 4] << 6) | (vals[i * 4 + 1] << 4) | (vals[i * 4 + 2] << 2) | vals[i * 4 + 3];
+    if (bytes.length === 0) return null; // les bits restants (< 8) sont du padding
     try {
-        return await decryptBytes(bytes, passphrase);
+        return await decryptBytes(new Uint8Array(bytes), passphrase);
     } catch {
         return null;
     }
