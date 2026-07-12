@@ -41,6 +41,11 @@ function deriveKey(passphrase) {
     return key;
 }
 
+// Pré-dérive la clé (PBKDF2 ~50-100 ms) pour que le 1er déchiffrement soit instantané.
+export function warmKey(passphrase) {
+    if (passphrase) void deriveKey(passphrase);
+}
+
 // --- Chiffrement : texte -> octets (iv || ciphertext+tag) -------------------
 async function encryptBytes(text, passphrase) {
     const key = await deriveKey(passphrase);

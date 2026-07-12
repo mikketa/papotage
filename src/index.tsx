@@ -9,9 +9,9 @@ import { addMessagePreSendListener, removeMessagePreSendListener } from "@api/Me
 import { updateMessage } from "@api/MessageUpdater";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
-import { FluxDispatcher, MessageStore, SelectedChannelStore, useState } from "@webpack/common";
+import { FluxDispatcher, MessageStore, SelectedChannelStore, Toasts, useState } from "@webpack/common";
 
-import { decodeEmoji, decodeHidden, encodeEmoji, encodeHidden, parseInput } from "./codec.mjs";
+import { decodeEmoji, decodeHidden, encodeEmoji, encodeHidden, parseInput, warmKey } from "./codec.mjs";
 
 const MARK = "⁠"; // marqueur zero-width : signale un message déjà chiffré
 
@@ -90,22 +90,32 @@ const PapotageButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
 // d'emojis du dico (2 par octet, donc des dizaines) ; on exige un run pour ne PAS
 // lancer le décodage sur un message normal qui contient juste un 😂 ou un 👍.
 const EMOJI_RUN_RE = /[😀😂😅😍🤔😎😭😡👍🔥🎉💀👀🚀🍕💯]{16,}/u;
-const inFlight = new Set<string>(); // messages en cours de déchiffrement (anti-doublon)
+const inFlight = new Set<string>();       // déchiffrements simultanés (anti-doublon)
+const decided = new Map<string, string>(); // messageId -> contenu déjà traité (anti-rejeu)
+let lastPass = "";                         // si le mot de passe change, on réessaie tout
 
 // --- Déchiffrement : remplace le contenu affiché par le vrai message ---------
 async function tryDecrypt(channelId: string, messageId: string, content: string) {
     if (!settings.store.autoDecrypt) return;
     const pass = settings.store.passphrase;
     if (!pass || !content) return;
+    if (pass !== lastPass) { decided.clear(); lastPass = pass; }
 
     const hasMark = content.includes(MARK);
     if (!hasMark && !EMOJI_RUN_RE.test(content)) return; // clairement pas chiffré
-    if (inFlight.has(messageId)) return;
+    // déjà tenté sur ce contenu (échec compris) ou en cours : ne pas rejouer le décrypt
+    if (decided.get(messageId) === content || inFlight.has(messageId)) return;
 
     inFlight.add(messageId);
     try {
         const txt = hasMark ? await decodeHidden(content, pass) : await decodeEmoji(content, pass);
-        if (txt != null) updateMessage(channelId, messageId, { content: settings.store.showLock ? `🔓 ${txt}` : txt });
+        if (decided.size > 5000) decided.clear();
+        decided.set(messageId, content);
+        if (txt != null) {
+            const shown = settings.store.showLock ? `🔓 ${txt}` : txt;
+            decided.set(messageId, shown); // le contenu remplacé ne repassera pas le filtre
+            updateMessage(channelId, messageId, { content: shown });
+        }
     } finally {
         inFlight.delete(messageId);
     }
@@ -127,7 +137,18 @@ function scanCurrent() {
 const onCreate = (e: any) => { const m = e?.message; if (m?.content) tryDecrypt(m.channel_id, m.id, m.content); };
 const onUpdate = (e: any) => { const m = e?.message; if (m?.content) tryDecrypt(m.channel_id, m.id, m.content); };
 const onSelect = (e: any) => scanChannel(e?.channelId);
-const onLoad = (e: any) => scanChannel(e?.channelId);
+// LOAD_MESSAGES_SUCCESS est émis par page d'historique : ne traiter que la page
+// chargée (et pas tout le salon à chaque fois), sinon le scroll d'historique est
+// quadratique. Repli sur un scan complet si le payload ne porte pas les messages.
+const onLoad = (e: any) => {
+    if (!e?.channelId) return;
+    const msgs = e?.messages;
+    if (Array.isArray(msgs) && msgs.length) {
+        for (const m of msgs) if (m?.content) tryDecrypt(e.channelId, m.id, m.content);
+    } else {
+        scanChannel(e.channelId);
+    }
+};
 
 let preSend: any;
 
@@ -149,9 +170,20 @@ export default definePlugin({
             if (!secret) return;
             const chosenCover = cover ?? (settings.store.customCover || undefined);
 
-            msg.content = settings.store.emojiMode
+            const encoded = settings.store.emojiMode
                 ? await encodeEmoji(secret, pass, chosenCover)
                 : await encodeHidden(secret, pass, chosenCover);
+
+            // Discord rejette silencieusement > 2000 caractères : prévenir au lieu
+            // de laisser le message ne pas partir sans explication.
+            if (encoded.length > 2000) {
+                Toasts.show({
+                    id: Toasts.genId(),
+                    type: Toasts.Type.FAILURE,
+                    message: "Papotage : secret trop long pour un seul message (max ~480 caractères)."
+                });
+            }
+            msg.content = encoded;
         });
 
         addChatBarButton("papotage", PapotageButton, ({ ...props }) => <LockIcon on={false} {...props} />);
@@ -160,6 +192,8 @@ export default definePlugin({
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onUpdate);
         FluxDispatcher.subscribe("CHANNEL_SELECT", onSelect);
         FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onLoad);
+
+        warmKey(settings.store.passphrase); // pré-dérive la clé (1er déchiffrement instantané)
 
         // déchiffrer l'historique déjà affiché (ex. après un Ctrl+R, salon déjà ouvert)
         scanCurrent();
