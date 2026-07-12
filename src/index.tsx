@@ -86,13 +86,28 @@ const PapotageButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
     );
 };
 
+// Emojis du mode emoji : sert de filtre rapide (un message sans marqueur ni
+// emoji du dico n'est pas chiffré, on évite tout travail de décodage).
+const EMOJI_RE = /[😀😂😅😍🤔😎😭😡👍🔥🎉💀👀🚀🍕💯]/u;
+const inFlight = new Set<string>(); // messages en cours de déchiffrement (anti-doublon)
+
 // --- Déchiffrement : remplace le contenu affiché par le vrai message ---------
 async function tryDecrypt(channelId: string, messageId: string, content: string) {
+    if (!settings.store.autoDecrypt) return;
     const pass = settings.store.passphrase;
-    if (!settings.store.autoDecrypt || !pass || !content) return;
-    const txt = (await decodeHidden(content, pass)) ?? (await decodeEmoji(content, pass));
-    if (txt == null) return;
-    updateMessage(channelId, messageId, { content: settings.store.showLock ? `🔓 ${txt}` : txt });
+    if (!pass || !content) return;
+
+    const hasMark = content.includes(MARK);
+    if (!hasMark && !EMOJI_RE.test(content)) return; // clairement pas chiffré
+    if (inFlight.has(messageId)) return;
+
+    inFlight.add(messageId);
+    try {
+        const txt = hasMark ? await decodeHidden(content, pass) : await decodeEmoji(content, pass);
+        if (txt != null) updateMessage(channelId, messageId, { content: settings.store.showLock ? `🔓 ${txt}` : txt });
+    } finally {
+        inFlight.delete(messageId);
+    }
 }
 
 function scanChannel(channelId?: string) {

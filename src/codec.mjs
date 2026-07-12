@@ -15,17 +15,28 @@ function ivFromNonce(nonce4) {
 const BITS_PER_WORD = 5;  // chaque liste = 32 mots = 5 bits
 
 // --- Dérivation de clé (PBKDF2 -> AES-GCM 256) ------------------------------
-async function deriveKey(passphrase) {
-    const base = await crypto.subtle.importKey(
-        "raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]
-    );
-    return crypto.subtle.deriveKey(
-        { name: "PBKDF2", salt: SALT, iterations: ITER, hash: "SHA-256" },
-        base,
-        { name: "AES-GCM", length: 256 },
-        false,
-        ["encrypt", "decrypt"]
-    );
+// PBKDF2 200k itérations coûte ~50-100 ms : on met la clé en cache par mot de
+// passe (le sel est fixe, donc la clé est déterministe). Déchiffrer un salon
+// entier ne dérive alors la clé qu'une seule fois au lieu d'une fois par message.
+const keyCache = new Map(); // passphrase -> Promise<CryptoKey>
+
+function deriveKey(passphrase) {
+    let key = keyCache.get(passphrase);
+    if (key) return key;
+    key = (async () => {
+        const base = await crypto.subtle.importKey(
+            "raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]
+        );
+        return crypto.subtle.deriveKey(
+            { name: "PBKDF2", salt: SALT, iterations: ITER, hash: "SHA-256" },
+            base,
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["encrypt", "decrypt"]
+        );
+    })();
+    keyCache.set(passphrase, key);
+    return key;
 }
 
 // --- Chiffrement : texte -> octets (iv || ciphertext+tag) -------------------
