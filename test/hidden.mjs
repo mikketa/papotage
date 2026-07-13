@@ -32,6 +32,15 @@ await check("message normal sans payload => null", async () => {
     assert(await decodeHidden("salut ça va les gars ?", PASS) === null);
 });
 
+await check("couverture contenant un word-joiner U+2060 => décode quand même", async () => {
+    // Régression : le MARK délimiteur EST U+2060 ; un U+2060 dans la couverture
+    // (texte copié, ancien message réutilisé) piégeait indexOf(MARK).
+    const clair = "mon secret";
+    const coverSale = "salut⁠ça va";
+    assert(await decodeHidden(await encodeHidden(clair, PASS, coverSale, 3), PASS) === clair, "3 bits");
+    assert(await decodeHidden(await encodeHidden(clair, PASS, coverSale, 2), PASS) === clair, "2 bits");
+});
+
 await check("densité 3 bits : aller-retour intact (accents/emojis)", async () => {
     const clair = "on se voit à 14h au café ☕ ramène les 📄, dis rien";
     const msg = await encodeHidden(clair, PASS, "ok", 3);

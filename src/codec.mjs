@@ -5,13 +5,15 @@ import { LISTS, GLUE } from "./wordlist.mjs";
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 const SALT = ENC.encode("papotage-v1-salt");
-const ITER = 200_000;
-const NONCE_LEN = 4;      // octets transmis ; complétés à 12 pour l'IV GCM (garde les phrases courtes)
-const TAG_BITS = 64;      // tag GCM tronqué (compromis taille/sécurité casual)
+const ITER = 600_000;     // PBKDF2 (aligné OWASP) ; coût amorti par le cache de clé
+const NONCE_LEN = 5;      // octets transmis ; complétés à 12 pour l'IV GCM
+const TAG_BITS = 32;      // tag GCM tronqué (32 bits = suffisant en casual, valeur valide WebCrypto)
+// Budget d'en-tête : nonce 5 o + tag 4 o = 9 o (au lieu de 12), et le nonce passe
+// de 31 à 39 bits effectifs -> seuil de collision ~6 570 -> ~105 000 messages.
 
-function ivFromNonce(nonce4) {
+function ivFromNonce(nonce) {
     const iv = new Uint8Array(12);
-    iv.set(nonce4, 0);    // 8 octets restants à zéro (fixes)
+    iv.set(nonce, 0);     // octets restants à zéro (fixes)
     return iv;
 }
 const BITS_PER_WORD = 5;  // chaque liste = 32 mots = 5 bits
@@ -63,6 +65,7 @@ function deriveKey(passphrase) {
             ["encrypt", "decrypt"]
         );
     })();
+    key.catch(() => keyCache.delete(passphrase)); // ne pas garder un échec en cache
     keyCache.set(passphrase, key);
     return key;
 }
@@ -102,11 +105,7 @@ async function decryptBytes(bytes, passphrase) {
         { name: "AES-GCM", iv: ivFromNonce(nonce), tagLength: TAG_BITS }, key, ct
     ));
     if (!zipped) return DEC.decode(pt);
-    try {
-        return DEC.decode(await inflate(pt));
-    } catch {
-        return DEC.decode(pt); // repli : ancien message dont le bit aléatoire valait 1
-    }
+    return DEC.decode(await inflate(pt)); // si inflate lève, l'appelant renvoie null (fail-closed)
 }
 
 // --- Octets <-> phrases -----------------------------------------------------
@@ -257,7 +256,9 @@ export async function encodeHidden(text, passphrase, cover, bits = 2) {
         }
     }
     if (accBits > 0) zw += ZW_ALL[(acc << (bits - accBits)) & mask]; // bits de fin (padding)
-    return pickNaturalCover(cover) + MARK + zw;
+    // Retirer tout MARK déjà présent dans la couverture (ex. couverture copiée
+    // depuis un ancien message Papotage) : sinon indexOf(MARK) tomberait dessus.
+    return pickNaturalCover(cover).split(MARK).join("") + MARK + zw;
 }
 
 // Renvoie le texte clair, ou null si pas de payload caché / mauvaise clé.
@@ -432,11 +433,13 @@ export async function decodeEmoji(message, passphrase) {
     for (const off of [0, 1]) {
         const bytes = [];
         for (let i = off; i + 1 < nibbles.length; i += 2) bytes.push((nibbles[i] << 4) | nibbles[i + 1]);
-        const start = bytes.indexOf(MAGIC);
-        if (start < 0) continue;
-        try {
-            return await decryptBytes(new Uint8Array(bytes.slice(start + 1)), passphrase);
-        } catch { /* on tente l'autre alignement */ }
+        // Essayer CHAQUE occurrence de MAGIC : une couverture peut contenir un faux
+        // MAGIC (0xC7 se rend 👀😡), il faut pouvoir sauter jusqu'au vrai.
+        for (let start = bytes.indexOf(MAGIC); start >= 0; start = bytes.indexOf(MAGIC, start + 1)) {
+            try {
+                return await decryptBytes(new Uint8Array(bytes.slice(start + 1)), passphrase);
+            } catch { /* MAGIC suivant / autre alignement */ }
+        }
     }
     return null;
 }

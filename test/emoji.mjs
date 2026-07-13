@@ -25,6 +25,15 @@ await check("avec couverture texte", async () => {
     assert(await decodeEmoji(msg, PASS) === "le code c'est 4271");
 });
 
+await check("couverture contenant des emojis du dico (faux MAGIC 👀😡) => décode quand même", async () => {
+    // Régression : 0xC7 (MAGIC) se rend 👀😡. Une couverture avec ces emojis
+    // insérait un faux MAGIC ; le décodeur doit itérer jusqu'au vrai.
+    for (const cover of ["👀😡 lol", "regarde 🔥💀 ça", "😀 test 💯"]) {
+        const msg = await encodeEmoji("code", PASS, cover);
+        assert(await decodeEmoji(msg, PASS) === "code", `cassé avec couverture "${cover}"`);
+    }
+});
+
 await check("mauvaise clé => null", async () => {
     assert(await decodeEmoji(await encodeEmoji("secret", PASS), "faux") === null);
 });

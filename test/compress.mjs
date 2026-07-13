@@ -17,9 +17,10 @@ await check("aller-retour d'un long message compressible", async () => {
 });
 
 await check("la compression réduit vraiment la taille envoyée", async () => {
-    // 4 caractères invisibles par octet : sans compression, ~ (longueur+12)*4.
+    // 4 caractères invisibles par octet (2 bits) : sans compression, ~ (longueur+9)*4
+    // (9 = overhead nonce 5 o + tag 4 o).
     const octets = new TextEncoder().encode(LONG).length;
-    const sansCompression = (octets + 12) * 4;
+    const sansCompression = (octets + 9) * 4;
     const msg = await encodeHidden(LONG, PASS, "ok");
     console.log(`   ${octets} octets clairs -> ${len(msg)} car. envoyés (au lieu de ~${sansCompression} sans compression)`);
     assert(len(msg) < sansCompression, "la compression n'a pas réduit la taille");
