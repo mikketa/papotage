@@ -105,16 +105,20 @@ async function tryDecrypt(channelId: string, messageId: string, content: string)
     const pass = settings.store.passphrase;
     if (!pass || !content) return;
     if (pass !== lastPass) { decided.clear(); lastPass = pass; }
+    // Dédoublonnage AVANT le pré-filtre : un message déjà traité (échec compris,
+    // ou contenu déjà remplacé) ne relance ni la regex ni le décrypt aux re-scans.
+    if (inFlight.has(messageId) || decided.get(messageId) === content) return;
 
     const hasMark = content.includes(MARK);
     if (!hasMark && !EMOJI_RUN_RE.test(content)) return; // clairement pas chiffré
-    // déjà tenté sur ce contenu (échec compris) ou en cours : ne pas rejouer le décrypt
-    if (decided.get(messageId) === content || inFlight.has(messageId)) return;
 
     inFlight.add(messageId);
     try {
         const txt = hasMark ? await decodeHidden(content, pass) : await decodeEmoji(content, pass);
-        if (decided.size > 5000) decided.clear();
+        if (decided.size > 5000) {           // éviction des 1000 plus anciens (Map = ordre d'insertion),
+            let n = 1000;                    // au lieu d'un vidage total qui re-déchiffre tout ensuite
+            for (const k of decided.keys()) { decided.delete(k); if (--n === 0) break; }
+        }
         decided.set(messageId, content);
         if (txt != null) {
             const shown = settings.store.showLock ? `🔓 ${txt}` : txt;
@@ -156,6 +160,7 @@ const onLoad = (e: any) => {
 };
 
 let preSend: any;
+let scanTimers: any[] = []; // timers de scan différés, à annuler au stop()
 
 export default definePlugin({
     name: "Papotage",
@@ -171,7 +176,10 @@ export default definePlugin({
             if (!pass || !msg.content) return;
             if (msg.content.includes(MARK)) return; // déjà chiffré : ne pas ré-encoder
 
-            const { cover, secret } = parseInput(msg.content, settings.store.separator || " | ");
+            // un séparateur vide ou fait uniquement d'espaces découperait tous les
+            // messages normaux -> repli sur " | " dans ce cas.
+            const sep = settings.store.separator?.trim() ? settings.store.separator : " | ";
+            const { cover, secret } = parseInput(msg.content, sep);
             if (!secret) return;
             const chosenCover = cover ?? (settings.store.customCover || undefined);
 
@@ -202,13 +210,14 @@ export default definePlugin({
 
         // déchiffrer l'historique déjà affiché (ex. après un Ctrl+R, salon déjà ouvert)
         scanCurrent();
-        setTimeout(scanCurrent, 1500);
-        setTimeout(scanCurrent, 4000);
+        scanTimers.push(setTimeout(scanCurrent, 1500), setTimeout(scanCurrent, 4000));
     },
 
     stop() {
         removeMessagePreSendListener(preSend);
         removeChatBarButton("papotage");
+        scanTimers.forEach(clearTimeout);
+        scanTimers = [];
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onUpdate);
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", onSelect);
