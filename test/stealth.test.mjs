@@ -89,8 +89,10 @@ test("le mode invisible ampute les emojis à liant, et c'est documenté", async 
     // possible serait de corrompre le payload.
     const cover = "coucou 👨\u200d👩\u200d👧 ça va";
     const msg = await encodeHidden("secret", PASS, { cover, context: CTX });
-    assert.ok(!isSubsequence(cover, msg), "le liant de la couverture devrait avoir disparu");
-    assert.ok(isSubsequence("coucou 👨👩👧 ça va", msg), "le reste de la couverture doit survivre");
+    // Comparer le texte VISIBLE, pas une sous-séquence : le payload dispersé
+    // contient lui-même des liants, et l'un d'eux pourrait tomber entre deux
+    // emojis et satisfaire la recherche par hasard. La règle est déterministe.
+    assert.equal(visible(msg), "coucou 👨👩👧 ça va");
     assert.equal(await decodeHidden(msg, PASS, { context: CTX }), "secret");
 });
 

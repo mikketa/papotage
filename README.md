@@ -104,13 +104,19 @@ se teste en local :
 
 ```bash
 npm test        # Node >= 20
+npm run bench   # mesures de performance
 ```
 
-104 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
+105 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
 salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), les
 règles d'envoi du plugin, les propriétés de discrétion (absence de marqueur fixe,
 dispersion du payload, intégrité des emojis de couverture, variété des phrases) et la
 détection d'un message altéré par Discord.
+
+Les chemins chauds sont mesurés, pas devinés (`npm run bench`). Le pré-filtre tourne
+sur chaque message de chaque scan de salon : il rejette un message ordinaire en
+**0,1 µs** contre 57 µs auparavant, et scanner un salon de 500 messages est passé de
+550 µs à 49 µs.
 
 Les API Vencord utilisées (`addChatBarButton`, `addMessagePreSendListener`,
 `addMessagePreEditListener`, `updateMessage`, `OptionType.SELECT`, `Toasts`,
@@ -125,6 +131,7 @@ CI compile `index.tsx` avec esbuild à chaque changement.
 - `src/plugin-core.mjs` — règles d'envoi et de réception, sans dépendance Vencord
 - `src/index.tsx` — câblage Vencord (bouton, événements, toasts)
 - `test/` — suite de tests (`node:test`)
+- `bench/` — mesures de performance
 
 ## Licence
 

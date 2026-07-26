@@ -35,7 +35,7 @@
 // plus.
 
 import { pickCover } from "./covers.mjs";
-import { randomInt } from "./random.mjs";
+import { randomInts } from "./random.mjs";
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -58,6 +58,11 @@ export const PADDING = { BLOCK: "bloc", BUCKET: "palier" };
 // vraiment la taille ; le drapeau voyage dans l'en-tête chiffré.
 const HAS_COMPRESSION = typeof CompressionStream === "function"
     && typeof DecompressionStream === "function";
+
+// Mesuré : deflate-raw ne devient gagnant qu'à partir d'une trentaine d'octets
+// (16 octets en donnent 18, 32 en donnent 31). En dessous, c'est du calcul pur
+// perdu — le résultat serait de toute façon écarté.
+const MIN_DEFLATE = 32;
 
 async function pipeThrough(stream, bytes) {
     const writer = stream.writable.getWriter();
@@ -115,6 +120,10 @@ function unpad(bytes) {
 //     compromission d'un salon ne déchiffre pas les autres.
 // PBKDF2 600k coûte ~300 ms : on met la clé en cache (sel déterministe pour un
 // contexte donné), sinon déchiffrer un salon dériverait la clé à chaque message.
+// Borné : une dérivation coûte ~104 ms de CPU (mesuré) et retient une clé en
+// mémoire. Sans limite, parcourir cent salons en dérivait cent et les gardait
+// toutes jusqu'au rechargement de Discord.
+const KEY_CACHE_MAX = 16;
 const keyCache = new Map(); // `${context}\0${passphrase}` -> Promise<CryptoKey>
 
 async function saltFor(context) {
@@ -123,9 +132,13 @@ async function saltFor(context) {
 
 function deriveKey(passphrase, context = "") {
     const cacheKey = `${context}\u0000${passphrase}`;
-    let key = keyCache.get(cacheKey);
-    if (key) return key;
-    key = (async () => {
+    const cached = keyCache.get(cacheKey);
+    if (cached) {
+        keyCache.delete(cacheKey); // réinsertion = remise en tête (Map = ordre d'insertion)
+        keyCache.set(cacheKey, cached);
+        return cached;
+    }
+    const key = (async () => {
         const base = await crypto.subtle.importKey(
             "raw", ENC.encode(passphrase), "PBKDF2", false, ["deriveKey"]
         );
@@ -138,6 +151,7 @@ function deriveKey(passphrase, context = "") {
         );
     })();
     key.catch(() => keyCache.delete(cacheKey)); // ne pas garder un échec en cache
+    if (keyCache.size >= KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
     keyCache.set(cacheKey, key);
     return key;
 }
@@ -158,7 +172,7 @@ async function encryptBytes(text, passphrase, context = "", padding = PADDING.BL
     const raw = ENC.encode(text);
 
     let body = raw, flags = 0;
-    if (HAS_COMPRESSION) {
+    if (HAS_COMPRESSION && raw.length >= MIN_DEFLATE) {
         const packed = await deflate(raw);
         if (packed.length < raw.length) { body = packed; flags |= FLAG_ZIPPED; }
     }
@@ -231,8 +245,7 @@ function scatter(cover, symbols, { allowLeading = true, fromGrapheme = 0 } = {})
     const slots = Math.max(1, gs.length + (leading ? 1 : 0));
 
     // Composition aléatoire uniforme de symbols.length en `slots` parts.
-    const cuts = [];
-    for (let i = 0; i < slots - 1; i++) cuts.push(randomInt(symbols.length + 1));
+    const cuts = randomInts(slots - 1, symbols.length + 1);
     cuts.sort((a, b) => a - b);
     const parts = [];
     let prev = 0;
@@ -260,6 +273,13 @@ function scatter(cover, symbols, { allowLeading = true, fromGrapheme = 0 } = {})
 // récepteur s'adapte seul, rien à régler de son côté.
 const ZW_ALL = ["​", "‌", "‍", "⁠", "⁡", "⁢", "⁣", "⁤"];
 const ZW_VAL = new Map(ZW_ALL.map((c, i) => [c, i]));
+
+// Alphabet du mode emoji : 16 emojis = les 16 valeurs hexa. Tous
+// single-codepoint, sans sélecteur de variation ni modificateur de teinte.
+// Déclaré ici avec les autres alphabets : le pré-filtre en a besoin bien avant
+// la section qui encode.
+export const EMOJI = ["😀", "😂", "😅", "😍", "🤔", "😎", "😭", "😡", "👍", "🔥", "🎉", "💀", "👀", "🚀", "🍕", "💯"];
+const EMOJI_INDEX = new Map(EMOJI.map((e, i) => [e, i]));
 
 // Sélecteurs de variation du mode compact (256 valeurs disponibles).
 function byteToVS(b) { return b < 16 ? 0xfe00 + b : 0xe0100 + (b - 16); }
@@ -307,19 +327,64 @@ export function visibleText(message) {
     return out;
 }
 
-// Nombre de symboles de chaque alphabet présents dans un message. Sert au
-// pré-filtre du plugin : sans marqueur fixe, c'est la quantité qui trahit un
-// payload, plus sa position.
+// Un seul passage pour tout ce dont le pré-filtre a besoin : combien de
+// symboles de chaque alphabet invisible, et la plus longue série d'emojis du
+// dictionnaire. Appelé sur CHAQUE message de CHAQUE scan de salon, donc écrit
+// pour ne rien allouer :
+//   - itération par unité UTF-16 avec charCodeAt, pas `for...of` qui construit
+//     une chaîne par caractère ;
+//   - sortie anticipée dès qu'un seuil est atteint, testée seulement dans les
+//     branches qui incrémentent — un message ordinaire n'en paie jamais le prix.
+const EMOJI_CP = new Set(EMOJI.map(e => e.codePointAt(0)));
+
+// Rejet rapide. Un message de salon ordinaire — même accentué — ne contient
+// aucun caractère susceptible d'alimenter les compteurs : ni zero-width, ni
+// sélecteur de variation, ni demi-codet haut (donc aucun emoji ni sélecteur
+// supplémentaire). Le moteur d'expressions régulières tranche ça en 0,03 µs,
+// contre 8,4 µs pour la boucle sur 1900 caractères — mesuré, soit 280x.
+// Pas de drapeau `u` : on veut raisonner en unités UTF-16, demi-codets compris.
+const MAYBE_SYMBOL = /[\u200b-\u200d\u2060-\u2064\ufe00-\ufe0f\ud800-\udbff]/;
+const NOTHING = Object.freeze({ hidden: 0, compact: 0, emojiRun: 0 });
+
+export function scanSymbols(message, stop = {}) {
+    if (!MAYBE_SYMBOL.test(message)) return NOTHING;
+    const stopHidden = stop.hidden ?? Infinity;
+    const stopCompact = stop.compact ?? Infinity;
+    const stopEmoji = stop.emoji ?? Infinity;
+    let hidden = 0, compact = 0, run = 0, bestRun = 0;
+
+    for (let i = 0; i < message.length; i++) {
+        const c = message.charCodeAt(i);
+        if (c >= 0xd800 && c <= 0xdbff && i + 1 < message.length) {
+            const cp = (c - 0xd800) * 0x400 + (message.charCodeAt(i + 1) - 0xdc00) + 0x10000;
+            i++;
+            if (cp >= 0xe0100 && cp <= 0xe01ef) {
+                if (++compact >= stopCompact) break;
+            } else if (EMOJI_CP.has(cp)) {
+                run++;
+                if (run > bestRun) {
+                    bestRun = run;
+                    if (bestRun >= stopEmoji) break;
+                }
+                continue;
+            }
+        } else if ((c >= 0x200b && c <= 0x200d) || (c >= 0x2060 && c <= 0x2064)) {
+            if (++hidden >= stopHidden) break;
+        } else if (c >= 0xfe00 && c <= 0xfe0f) {
+            if (++compact >= stopCompact) break;
+        }
+        run = 0;
+    }
+    return { hidden, compact, emojiRun: bestRun };
+}
+
+// Compteurs simples, pour les tests et les mesures.
 export function countHiddenSymbols(message) {
-    let n = 0;
-    for (const ch of message) if (ZW_VAL.has(ch)) n++;
-    return n;
+    return scanSymbols(message).hidden;
 }
 
 export function countCompactSymbols(message) {
-    let n = 0;
-    for (const ch of message) if (vsToByte(ch.codePointAt(0)) !== null) n++;
-    return n;
+    return scanSymbols(message).compact;
 }
 
 function coverFor(cover, pool) {
@@ -421,10 +486,6 @@ export async function decodeCompact(message, passphrase, { context = "" } = {}) 
 // mais c'est le secret chiffré. Beaucoup moins discret que les modes invisibles
 // (une longue traînée d'emojis se voit) : réservé aux messages courts.
 // ===========================================================================
-// Tous single-codepoint, sans sélecteur de variation ni modificateur de teinte.
-export const EMOJI = ["😀", "😂", "😅", "😍", "🤔", "😎", "😭", "😡", "👍", "🔥", "🎉", "💀", "👀", "🚀", "🍕", "💯"];
-const EMOJI_INDEX = new Map(EMOJI.map((e, i) => [e, i]));
-
 export async function encodeEmoji(text, passphrase, { cover, context = "", padding } = {}) {
     const body = await encryptBytes(text, passphrase, context, padding);
     let seq = EMOJI[MAGIC >> 4] + EMOJI[MAGIC & 0x0f];

@@ -131,6 +131,36 @@ bloque aussi l'**édition** d'un message déchiffré : le contenu affiché ayant
 remplacé par le texte en clair, éditer sans garde-fou republierait le secret dans le
 salon.
 
+Ce garde-fou tient à un détail du gestionnaire de Vencord, vérifié dans sa source :
+
+```ts
+try {
+    const result = await listener(...);
+    if (result?.cancel) return true;
+} catch (e) {
+    MessageEventsLogger.error("... unknown error\n", e);   // journalise
+}
+return false;                                              // = ne pas annuler
+```
+
+Une exception qui s'échappe d'un listener n'annule donc **pas** l'envoi : Vencord la
+journalise et le message part. Le corps des deux listeners est pour cette raison
+intégralement enveloppé dans un `try`, pré-filtre compris, avec `{ cancel: true }`
+comme unique issue en cas d'erreur.
+
+## Mot de passe
+
+600 000 itérations PBKDF2 ne rachètent pas un mot de passe court : deviner le mot de
+passe reste la façon la plus réaliste de casser Papotage, loin devant toute attaque
+sur AES-GCM. Le réglage refuse les mots de passe de moins de 12 caractères avec une
+explication.
+
+Le cache de clés dérivées est borné à 16 entrées, avec éviction du moins récemment
+utilisé. Une dérivation coûte **104 ms de CPU** (mesuré) : sans borne, parcourir cent
+salons en dérivait cent et les gardait toutes en mémoire jusqu'au rechargement de
+Discord. La pré-dérivation à l'ouverture d'un salon ne se déclenche plus que là où le
+chiffrement est effectivement armé ; ailleurs la clé est dérivée à la demande.
+
 ## Signaler un problème
 
 Ouvrir une issue sur le dépôt. Pour un problème qui exposerait des utilisateurs,

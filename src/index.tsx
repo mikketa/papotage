@@ -38,7 +38,11 @@ const settings = definePluginSettings({
     passphrase: {
         type: OptionType.STRING,
         description: "Mot de passe partagé (identique chez tous les participants)",
-        default: ""
+        default: "",
+        // 600 000 itérations PBKDF2 ne rachètent pas un mot de passe de six
+        // caractères : c'est la façon la plus réaliste de casser Papotage.
+        isValid: (v: string) => !v || v.length >= 12
+            || "Trop court : sous 12 caractères, le mot de passe se devine plus vite que le chiffrement ne se casse."
     },
     mode: {
         type: OptionType.SELECT,
@@ -246,9 +250,13 @@ const onCreate = (e: any) => {
 };
 const onUpdate = (e: any) => { const m = e?.message; if (m?.content) decryptLater(m.channel_id, m.id, m.content); };
 const onSelect = (e: any) => {
-    // Pré-dérive la clé du salon ouvert : PBKDF2 600k coûte ~300 ms, autant les
-    // payer avant le premier message plutôt que pendant.
-    if (e?.channelId) warmKey(settings.store.passphrase, e.channelId);
+    // Pré-dérive la clé, mais SEULEMENT là où le chiffrement est armé : chaque
+    // dérivation coûte ~104 ms de CPU (mesuré) et occupe une place dans un cache
+    // borné à 16 entrées. Pré-chauffer chaque salon parcouru gaspillait les deux.
+    // Ailleurs, la clé est dérivée à la demande au premier message reconnu.
+    if (e?.channelId && enabledChannels.has(e.channelId)) {
+        warmKey(settings.store.passphrase, e.channelId);
+    }
     scanChannel(e?.channelId);
 };
 // LOAD_MESSAGES_SUCCESS est émis par page d'historique : ne traiter que la page
@@ -280,11 +288,15 @@ export default definePlugin({
         // Toute erreur annule l'envoi. Le mode dégradé « on envoie quand même »
         // publierait le secret en clair, ce qui est pire que ne rien envoyer.
         preSend = addMessagePreSendListener(async (channelId, msg) => {
-            if (!enabledChannels.has(channelId)) return;
-            if (!msg.content) return;
-            if (isPapotageMessage(msg.content)) return; // déjà chiffré : ne pas ré-encoder
-
+            // Le try couvre TOUT le corps, pré-filtre compris. Vencord attend bien
+            // les listeners asynchrones, mais son gestionnaire journalise les
+            // exceptions et renvoie `false` — c'est-à-dire « ne pas annuler ».
+            // Une exception qui s'échappe d'ici publierait donc le message EN CLAIR.
             try {
+                if (!enabledChannels.has(channelId)) return;
+                if (!msg.content) return;
+                if (isPapotageMessage(msg.content)) return; // déjà chiffré : ne pas ré-encoder
+
                 msg.content = await encodeOutgoing({ ...encodeSettings(), raw: msg.content, context: channelId });
                 ledger.remember(msg.content);
             } catch (e) {
@@ -300,8 +312,10 @@ export default definePlugin({
         // d'édition est donc pré-remplie avec le SECRET. Sans ce garde-fou,
         // éditer un message revient à le publier en clair dans le salon.
         preEdit = addMessagePreEditListener(async (channelId, messageId, msg) => {
-            if (!decrypted.has(messageId)) return;
+            // Même raison qu'à l'envoi : une exception qui s'échappe republierait
+            // le clair dans le salon.
             try {
+                if (!decrypted.has(messageId)) return;
                 msg.content = await encodeOutgoing({
                     ...encodeSettings(), raw: stripLockPrefix(msg.content), context: channelId
                 });
@@ -318,8 +332,6 @@ export default definePlugin({
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onUpdate);
         FluxDispatcher.subscribe("CHANNEL_SELECT", onSelect);
         FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onLoad);
-
-        try { warmKey(settings.store.passphrase, SelectedChannelStore.getChannelId()); } catch { /* ignore */ }
 
         // déchiffrer l'historique déjà affiché (ex. après un Ctrl+R, salon déjà ouvert)
         scanCurrent();

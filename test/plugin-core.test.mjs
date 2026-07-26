@@ -18,7 +18,7 @@ import {
     resolveSeparator,
     stripLockPrefix
 } from "../src/plugin-core.mjs";
-import { visibleText } from "../src/codec.mjs";
+import { EMOJI, scanSymbols, visibleText } from "../src/codec.mjs";
 import { CTX, OTHER_CTX, PASS, incompressible, visible } from "./helpers.mjs";
 
 const base = { passphrase: PASS, context: CTX };
@@ -257,3 +257,46 @@ test("le registre reste borné", async () => {
     for (let i = 0; i < 20; i++) ledger.remember(`msg${i}`);
     assert.equal(ledger.size, 4);
 });
+
+// --- Pré-filtre : le rejet rapide ne doit jamais diverger --------------------
+
+test("le rejet rapide donne exactement le même résultat que la boucle complète", async () => {
+    // scanSymbols court-circuite les messages sans caractère candidat. Si ce
+    // raccourci se désynchronisait de la boucle, des messages chiffrés
+    // deviendraient invisibles au plugin — ou l'inverse. On compare les deux
+    // chemins sur des entrées choisies pour tomber des deux côtés de la limite.
+    const echantillons = [
+        "message ordinaire en ascii",
+        "français accentué : où ça, à côté ?",
+        "avec un emoji 👍 dedans",
+        "avec un cœur ❤️ et son sélecteur",
+        "​‌‍ invisible",
+        "⁠".repeat(100),
+        "🏳️‍🌈👨‍👩‍👧",
+        "",
+        "\ud800",                       // demi-codet haut orphelin
+        await encodeOutgoing({ ...base, raw: "un vrai message chiffré" }),
+        await encodeOutgoing({ ...base, raw: "compact", mode: MODE.COMPACT }),
+        await encodeOutgoing({ ...base, raw: "emoji", mode: MODE.EMOJI })
+    ];
+    for (const s of echantillons) {
+        const rapide = scanSymbols(s);
+        const complet = scanReference(s);
+        assert.deepEqual({ ...rapide }, complet, `divergence sur ${JSON.stringify(s.slice(0, 30))}`);
+    }
+});
+
+// Implémentation de référence, volontairement naïve et lente.
+function scanReference(message) {
+    let hidden = 0, compact = 0, run = 0, best = 0;
+    for (const ch of message) {
+        const cp = ch.codePointAt(0);
+        let emoji = false;
+        if ((cp >= 0x200b && cp <= 0x200d) || (cp >= 0x2060 && cp <= 0x2064)) hidden++;
+        else if ((cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef)) compact++;
+        else if (EMOJI.some(e => e.codePointAt(0) === cp)) emoji = true;
+        run = emoji ? run + 1 : 0;
+        if (run > best) best = run;
+    }
+    return { hidden, compact, emojiRun: best };
+}

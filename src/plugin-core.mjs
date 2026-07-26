@@ -5,8 +5,8 @@
 // câblage (boutons, événements Flux, toasts).
 
 import {
-    EMOJI, PADDING,
-    countCompactSymbols, countHiddenSymbols,
+    PADDING,
+    scanSymbols,
     decodeCompact, decodeEmoji, decodeHidden,
     visibleText,
     encodeCompact, encodeEmoji, encodeHidden,
@@ -128,15 +128,18 @@ export async function encodeOutgoing({
 const MIN_HIDDEN = 64;
 const MIN_COMPACT = 40;
 
-// Le mode emoji, lui, produit bien une série contiguë : un run reste le bon
-// filtre, et il évite de réagir à un simple 👍 dans une phrase.
-const EMOJI_RUN = new RegExp(`[${EMOJI.join("")}]{32,}`, "u");
+// Le mode emoji, lui, produit bien une série contiguë : c'est un run qu'on
+// cherche, et il évite de réagir à un simple 👍 dans une phrase.
+const MIN_EMOJI_RUN = 32;
+const STOP = { hidden: MIN_HIDDEN, compact: MIN_COMPACT, emoji: MIN_EMOJI_RUN };
 
 export function detectMode(content) {
     if (!content) return null;
-    if (countHiddenSymbols(content) >= MIN_HIDDEN) return MODE.HIDDEN; // couvre HIDDEN_SAFE
-    if (countCompactSymbols(content) >= MIN_COMPACT) return MODE.COMPACT;
-    if (EMOJI_RUN.test(content)) return MODE.EMOJI;
+    // Un seul passage sur le message, avec sortie dès qu'un seuil est franchi.
+    const { hidden, compact, emojiRun } = scanSymbols(content, STOP);
+    if (hidden >= MIN_HIDDEN) return MODE.HIDDEN; // couvre aussi HIDDEN_SAFE
+    if (compact >= MIN_COMPACT) return MODE.COMPACT;
+    if (emojiRun >= MIN_EMOJI_RUN) return MODE.EMOJI;
     return null;
 }
 
