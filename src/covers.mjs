@@ -1,14 +1,26 @@
 // Phrases de couverture : ce que voit un observateur qui n'a pas le plugin.
 //
-// Le point faible d'un stégano-canal, ce n'est pas le chiffrement : c'est la
-// répétition. Un pool de 15 phrases fixes finit par signer le canal ("cette
-// personne écrit toujours les 15 mêmes réponses, toujours suivies de 400
-// caractères invisibles"). On compose donc la couverture à partir de deux
-// pools -> quelques centaines de combinaisons, sans écrire 300 phrases à la main.
+// Le point faible d'un canal stéganographique, ce n'est pas le chiffrement,
+// c'est la régularité. Trois régularités se repèrent à l'œil nu, sans aucun
+// outil, juste en lisant le salon :
 //
-// Les phrases sont volontairement "réactives" (backchannel : accusé de réception,
-// approbation, hésitation) : ça passe crédiblement après n'importe quel message,
-// donc un fil entier en couvertures auto reste plausible.
+//   1. le vocabulaire — toujours les mêmes phrases ;
+//   2. la FORME — toujours la même longueur, la même structure ;
+//   3. la répétition rapprochée — deux fois la même phrase à trois messages
+//      d'écart, ce qu'un tirage aléatoire uniforme produit très vite.
+//
+// D'où : plusieurs gabarits de phrase (du "ok" sec à la question complète),
+// composés à partir de pools séparés, et une mémoire des derniers tirages pour
+// ne pas se répéter. Un utilisateur qui préfère ses propres phrases peut
+// fournir sa liste : le pool ci-dessous est public, donc connu de l'adversaire.
+
+import { pickOne as pick, randomInt } from "./random.mjs";
+
+const SHORT = [
+    "ok", "ouais", "mdr", "ah ok", "hmm", "jsp", "carrément", "ptdr",
+    "grave", "clair", "ça marche", "nickel", "ah bon", "yes", "bah ouais",
+    "mouais", "ah si", "voilà", "exact", "tranquille"
+];
 
 const OPENERS = [
     "ok ça marche",
@@ -28,7 +40,6 @@ const OPENERS = [
     "mouais à voir",
     "ok reçu",
     "ah bah tiens",
-    "carrément ouais",
     "bon bah nickel",
     "j'avoue ouais",
     "ah mais oui suis bête",
@@ -46,45 +57,123 @@ const OPENERS = [
     "hmm je sais pas trop",
     "ah si si je me souviens",
     "ouais ça se tente",
-    "franchement ouais",
     "bon on verra bien",
     "ok parfait",
     "ah mince ok",
-    "ouais pas de souci"
+    "ouais pas de souci",
+    "bon bref",
+    "ah ouais quand même"
 ];
 
-// Suffixes optionnels. La chaîne vide est répétée pour que la majorité des
-// couvertures restent nues (une phrase sur deux avec emoji ferait tache).
-const TAILS = [
-    "", "", "", "", "", "",
-    " 👍", " 😂", " 🤔", " 😅", " 🙌", " 🤷", " 😬", " 🔥"
+// Deuxième proposition, pour les gabarits en deux temps.
+const FOLLOWS = [
+    "je te redis",
+    "on verra",
+    "faut voir",
+    "j'y pense",
+    "je note",
+    "ça marche",
+    "pas de souci",
+    "je te tiens au courant",
+    "à voir demain",
+    "on en reparle",
+    "je check",
+    "faut que j'y réfléchisse"
 ];
 
-export const COVER_POOL_SIZE = OPENERS.length * TAILS.length;
+const QUESTIONS = [
+    "t'en penses quoi ?",
+    "tu fais quoi ce soir ?",
+    "c'est bon pour toi ?",
+    "on dit quoi du coup ?",
+    "t'es dispo quand ?",
+    "ça te va ?",
+    "tu confirmes ?",
+    "et sinon quoi de neuf ?",
+    "tu pars à quelle heure ?",
+    "c'était bien ?"
+];
 
-// Longueur maximale qu'une couverture auto peut atteindre — sert à réserver la
-// place dans le budget de caractères avant même d'avoir tiré la phrase.
-export const MAX_AUTO_COVER_LEN = Math.max(...OPENERS.map(o => o.length))
-    + Math.max(...TAILS.map(t => t.length));
+// Suffixes optionnels. La chaîne vide domine : une phrase sur deux avec emoji
+// serait elle-même une signature.
+const TAILS = ["", "", "", "", "", "", " 👍", " 😂", " 🤔", " 😅", " 🙌", " 🤷", " 😬", " 🔥"];
 
-function randIndex(n) {
-    // Rejet des valeurs qui déborderaient du dernier bloc complet : tirage
-    // uniforme, contrairement à un simple modulo.
-    const limit = Math.floor(0x1_0000_0000 / n) * n;
-    const buf = new Uint32Array(1);
-    for (;;) {
-        crypto.getRandomValues(buf);
-        if (buf[0] < limit) return buf[0] % n;
+// Gabarits, avec leur poids. La variété de FORME compte autant que celle du
+// vocabulaire : un fil où tous les messages font la même longueur se voit.
+const SHAPES = [
+    { weight: 20, build: () => pick(SHORT) },
+    { weight: 28, build: () => pick(OPENERS) },
+    { weight: 22, build: () => pick(OPENERS) + pick(TAILS) },
+    { weight: 15, build: () => `${pick(OPENERS)}, ${pick(FOLLOWS)}` },
+    { weight: 10, build: () => pick(QUESTIONS) },
+    { weight: 5, build: () => `${pick(SHORT)}, ${pick(FOLLOWS)}` }
+];
+
+const TOTAL_WEIGHT = SHAPES.reduce((n, s) => n + s.weight, 0);
+
+// Nombre de sorties distinctes possibles, tous gabarits confondus.
+export const COVER_POOL_SIZE =
+    SHORT.length
+    + OPENERS.length
+    + OPENERS.length * new Set(TAILS).size
+    + OPENERS.length * FOLLOWS.length
+    + QUESTIONS.length
+    + SHORT.length * FOLLOWS.length;
+
+// Majorant de la longueur d'une couverture automatique.
+const longest = list => Math.max(...list.map(s => s.length));
+export const MAX_AUTO_COVER_LEN =
+    longest(OPENERS) + 2 + longest(FOLLOWS) + longest(TAILS);
+
+// Mémoire des dernières couvertures produites. Sans elle, un tirage uniforme
+// sur 40 ouvertures répète la même phrase au bout de ~8 messages (paradoxe des
+// anniversaires) — exactement le motif qu'un lecteur du salon remarque.
+const RECENT_MAX = 16;
+const recent = [];
+
+function remember(cover) {
+    recent.push(cover);
+    if (recent.length > RECENT_MAX) recent.shift();
+    return cover;
+}
+
+// Tire jusqu'à obtenir une phrase absente des derniers tirages. Le nombre
+// d'essais est borné : avec un pool minuscule fourni par l'utilisateur, on
+// finit par accepter une répétition plutôt que de boucler.
+function pickFresh(generate, tries = 12) {
+    let cover = generate();
+    for (let i = 0; i < tries && recent.includes(cover); i++) cover = generate();
+    return remember(cover);
+}
+
+function generateAuto() {
+    let roll = randomInt(TOTAL_WEIGHT);
+    for (const shape of SHAPES) {
+        if (roll < shape.weight) return shape.build();
+        roll -= shape.weight;
     }
+    return pick(OPENERS); // inatteignable, filet de sécurité
 }
 
-export function pickFrom(list) {
-    return list[randIndex(list.length)];
+// Découpe une liste fournie par l'utilisateur. Le champ de réglage Vencord est
+// mono-ligne, donc on accepte aussi le point-virgule comme séparateur.
+export function parseCoverPool(text) {
+    if (!text) return [];
+    return text.split(/[\n;]/).map(s => s.trim()).filter(Boolean);
 }
 
-// Couverture à utiliser : la phrase perso si l'appelant en fournit une, sinon
-// une combinaison tirée au hasard.
-export function pickCover(custom) {
+// Couverture à utiliser :
+//   1. `custom` — phrase imposée pour ce message précis ;
+//   2. `pool`   — liste perso de l'utilisateur (le pool intégré est public,
+//                 donc connu de quiconque lit le code) ;
+//   3. sinon    — génération par gabarits.
+export function pickCover(custom, { pool } = {}) {
     if (custom && custom.trim()) return custom.trim();
-    return pickFrom(OPENERS) + pickFrom(TAILS);
+    if (pool && pool.length) return pickFresh(() => pick(pool));
+    return pickFresh(generateAuto);
+}
+
+// Vide la mémoire anti-répétition (tests, changement de pool).
+export function resetCoverHistory() {
+    recent.length = 0;
 }

@@ -52,13 +52,15 @@ test("un message vide échoue", async () => {
 test("un message trop long une fois chiffré échoue au lieu d'être avalé par Discord", async () => {
     // Discord rejette silencieusement au-delà de 2000 : sans cette erreur, le
     // message disparaissait sans que personne ne le sache.
+    // Couverture fixée : sa longueur varie de 2 à 59 caractères selon le
+    // gabarit tiré, ce qui rendrait le test proche du seuil non déterministe.
     await expectError("too-long", () =>
-        encodeOutgoing({ ...base, raw: incompressible(900), mode: MODE.HIDDEN }));
+        encodeOutgoing({ ...base, raw: incompressible(1200), mode: MODE.HIDDEN, defaultCover: "ok" }));
 });
 
 test("l'erreur de dépassement dit de combien on dépasse", async () => {
     await assert.rejects(
-        () => encodeOutgoing({ ...base, raw: incompressible(900) }),
+        () => encodeOutgoing({ ...base, raw: incompressible(1200), defaultCover: "ok" }),
         /trop long de \d+ caractères/
     );
 });

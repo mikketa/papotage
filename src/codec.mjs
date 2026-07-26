@@ -2,48 +2,58 @@
 // Fonctionne dans Node (>=20) et dans le navigateur : utilise globalThis.crypto.
 //
 // ===========================================================================
-// Format v2 (INCOMPATIBLE avec v1 : un message v1 se décode en null, et
-// réciproquement — la séparation est assurée par le domaine de dérivation).
+// Format v3 (incompatible v1 et v2 : la séparation est assurée par le domaine
+// de dérivation, un message d'une autre version se décode en null).
 // ===========================================================================
 //
-//   clair ──▶ [flags(1)] ──▶ deflate? ──▶ padding 16 o ──▶ AES-GCM ──▶ octets
-//                                                                       │
-//                              ┌────────────────────────────────────────┘
-//                              ▼
+//   clair ──▶ [flags(1)] ──▶ deflate? ──▶ padding ──▶ AES-GCM ──▶ octets
+//                                                                   │
+//                          ┌────────────────────────────────────────┘
+//                          ▼
 //   octets = nonce(12 o) || ciphertext || tag(16 o)
 //
-// Ce que v2 corrige par rapport à v1 :
-//   - nonce 12 o aléatoires (v1 : 5 o dont 1 bit de drapeau = 39 bits). Le sel
-//     PBKDF2 était constant, donc la clé était identique pour tous les
-//     utilisateurs et pour toujours : l'espace de nonces était partagé
-//     globalement. Une collision GCM n'expose pas seulement le XOR des clairs,
-//     elle donne la clé d'authentification GHASH -> forge de messages.
-//   - tag 128 bits (v1 : 32 bits tronqués -> forge à 2^-32 par essai, et les
-//     tags courts accélèrent la récupération de GHASH).
-//   - sel dérivé d'un contexte de conversation (v1 : constante publique, donc
-//     une seule précalculation cassait tous les utilisateurs à la fois).
-//   - drapeau de compression déplacé DANS le clair chiffré (v1 : en clair dans
-//     le nonce -> oracle sur la compressibilité du message).
-//   - padding à 16 octets : la longueur envoyée ne suit plus au caractère près
-//     la longueur du secret.
+// Chiffrement (inchangé depuis v2) : nonce de 12 octets aléatoires, tag GCM
+// complet de 128 bits, sel PBKDF2 dérivé du salon, drapeau de compression
+// placé DANS le clair chiffré pour ne pas fuiter la compressibilité.
 //
-// Coût total : 28 o d'en-tête au lieu de 9, plus 8 o de padding en moyenne.
-// Sur un message de 200 caractères en mode invisible dense, ça fait +12 %.
+// Ce que v3 change, côté DISSIMULATION :
+//   - plus de marqueur fixe. v2 annonçait le payload par un U+2060 : une
+//     constante publique, donc la signature parfaite pour un détecteur ("le
+//     premier word-joiner suivi de caractères invisibles"). Le décodeur
+//     ramasse désormais les symboles de son alphabet où qu'ils soient.
+//   - payload dispersé dans la couverture au lieu d'un bloc collé à la fin.
+//     v2 produisait une traînée de plusieurs centaines de caractères
+//     invisibles d'un seul tenant : c'est ce que cherchent les expressions
+//     régulières de détection.
+//   - padding par paliers en option, pour que la longueur du message ne suive
+//     plus la longueur du secret.
+//
+// À dire clairement : rien de tout cela ne rend le canal indétectable. Un
+// scanner qui COMPTE les caractères invisibles d'un message les trouvera
+// toujours. Ce qui change, c'est qu'il faut le faire exprès : les heuristiques
+// génériques (traînée de caractères de formatage, marqueur connu) ne suffisent
+// plus.
 
 import { pickCover } from "./covers.mjs";
+import { randomInt } from "./random.mjs";
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
-const DOMAIN = "papotage-v2";  // sépare les versions de protocole ET les contextes
+const DOMAIN = "papotage-v3";  // sépare les versions de protocole ET les contextes
 const ITER = 600_000;          // PBKDF2 aligné OWASP ; coût amorti par le cache de clé
 const NONCE_LEN = 12;          // = taille d'IV native de GCM, aucun remplissage
 const TAG_BITS = 128;          // tag complet : pas de troncature, pas de limite d'invocations
-const PAD_BLOCK = 16;          // quantum de padding (masque la longueur exacte)
+const PAD_BLOCK = 16;          // quantum de padding par défaut
 const FLAG_ZIPPED = 0x01;
 
+// Paliers du mode « longueur masquée ». Coûteux en place, mais la taille du
+// message ne dit alors plus que « quelque part entre deux paliers ».
+const BUCKETS = [64, 128, 256, 512, 1024, 1536, 2048];
+export const PADDING = { BLOCK: "bloc", BUCKET: "palier" };
+
 // --- Compression (deflate-raw) ----------------------------------------------
-// Chaque octet économisé = 2,7 à 4 caractères invisibles en moins. Format "raw"
+// Chaque octet économisé = 1 à 4 caractères invisibles en moins. Format "raw"
 // (sans en-tête zlib) pour ne rien gaspiller. Appliquée seulement si elle réduit
 // vraiment la taille ; le drapeau voyage dans l'en-tête chiffré.
 const HAS_COMPRESSION = typeof CompressionStream === "function"
@@ -71,18 +81,25 @@ const deflate = bytes => pipeThrough(new CompressionStream("deflate-raw"), bytes
 const inflate = bytes => pipeThrough(new DecompressionStream("deflate-raw"), bytes);
 
 // --- Padding ISO/IEC 7816-4 -------------------------------------------------
-// Un octet 0x80 puis des 0x00 jusqu'au prochain multiple de PAD_BLOCK. Toujours
-// au moins un octet ajouté, donc le dépaddage est non ambigu.
-function pad(bytes) {
-    const extra = PAD_BLOCK - (bytes.length % PAD_BLOCK);
-    const out = new Uint8Array(bytes.length + extra);
+// Un octet 0x80 puis des 0x00 jusqu'à la cible. Toujours au moins un octet
+// ajouté, donc le dépaddage est non ambigu quelle que soit la cible.
+function targetLength(n, mode) {
+    if (mode === PADDING.BUCKET) {
+        for (const b of BUCKETS) if (n < b) return b;
+        return Math.ceil((n + 1) / 512) * 512;
+    }
+    return (Math.floor(n / PAD_BLOCK) + 1) * PAD_BLOCK;
+}
+
+function pad(bytes, mode) {
+    const out = new Uint8Array(targetLength(bytes.length, mode));
     out.set(bytes, 0);
     out[bytes.length] = 0x80;
     return out;
 }
 
 function unpad(bytes) {
-    for (let i = bytes.length - 1, seen = 0; i >= 0 && seen < PAD_BLOCK; i--, seen++) {
+    for (let i = bytes.length - 1; i >= 0; i--) {
         if (bytes[i] === 0x00) continue;
         if (bytes[i] === 0x80) return bytes.subarray(0, i);
         break;
@@ -136,7 +153,7 @@ export function forgetKeys() {
 }
 
 // --- Chiffrement : texte -> octets (nonce || ciphertext+tag) ----------------
-async function encryptBytes(text, passphrase, context = "") {
+async function encryptBytes(text, passphrase, context = "", padding = PADDING.BLOCK) {
     const key = await deriveKey(passphrase, context);
     const raw = ENC.encode(text);
 
@@ -152,7 +169,7 @@ async function encryptBytes(text, passphrase, context = "") {
 
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
     const ct = new Uint8Array(await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv: nonce, tagLength: TAG_BITS }, key, pad(inner)
+        { name: "AES-GCM", iv: nonce, tagLength: TAG_BITS }, key, pad(inner, padding)
     ));
 
     const out = new Uint8Array(nonce.length + ct.length);
@@ -178,58 +195,152 @@ async function decryptBytes(bytes, passphrase, context = "") {
 }
 
 // Nombre d'octets envoyés pour un secret de `n` octets utiles (en-tête + padding).
-export function wireSize(n) {
-    return NONCE_LEN + TAG_BITS / 8 + (Math.floor((n + 1) / PAD_BLOCK) + 1) * PAD_BLOCK;
+export function wireSize(n, padding = PADDING.BLOCK) {
+    return NONCE_LEN + TAG_BITS / 8 + targetLength(n + 1, padding);
+}
+
+// ===========================================================================
+// Dispersion
+// ===========================================================================
+// Au lieu de coller le payload en fin de message, on le répartit dans les
+// intervalles de la couverture. Deux signatures disparaissent : le marqueur
+// fixe qui annonçait le début, et la traînée d'un seul tenant.
+//
+// Le découpage se fait par GRAPHÈMES et non par points de code : insérer un
+// caractère au milieu de « ❤️ » (U+2764 U+FE0F) ou d'un emoji composé casserait
+// son rendu et rendrait la couverture visiblement bizarre — l'inverse du but.
+const SEGMENTER = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter() : null;
+
+function graphemes(s) {
+    if (!SEGMENTER) return [...s]; // repli : points de code
+    const out = [];
+    for (const { segment } of SEGMENTER.segment(s)) out.push(segment);
+    return out;
+}
+
+// Répartit `symbols` (tableau de chaînes) dans les intervalles entre graphèmes.
+// Les tailles de paquets sont tirées au hasard : deux messages de même longueur
+// ne produisent pas la même découpe.
+// `allowLeading = false` interdit la position de tête, pour les symboles qui
+// doivent modifier un caractère de base (sélecteurs de variation).
+function scatter(cover, symbols, { allowLeading = true, fromGrapheme = 0 } = {}) {
+    const all = graphemes(cover);
+    const head = all.slice(0, fromGrapheme).join(""); // zone laissée intacte
+    const gs = all.slice(fromGrapheme);
+    const leading = allowLeading || gs.length === 0;
+    const slots = Math.max(1, gs.length + (leading ? 1 : 0));
+
+    // Composition aléatoire uniforme de symbols.length en `slots` parts.
+    const cuts = [];
+    for (let i = 0; i < slots - 1; i++) cuts.push(randomInt(symbols.length + 1));
+    cuts.sort((a, b) => a - b);
+    const parts = [];
+    let prev = 0;
+    for (const c of cuts) { parts.push(symbols.slice(prev, c).join("")); prev = c; }
+    parts.push(symbols.slice(prev).join(""));
+
+    let out = head, i = 0;
+    if (leading) out += parts[i++];
+    for (const g of gs) {
+        out += g;
+        if (i < parts.length) out += parts[i++];
+    }
+    return out;
 }
 
 // ===========================================================================
 // Mode invisible (zero-width) — le mode par défaut.
-// Message envoyé = [couverture visible] + MARK + [payload invisible].
 // ===========================================================================
 // Alphabet zero-width extensible. Plus il y a de symboles, moins on envoie de
 // caractères : 4 symboles = 2 bits/car, 8 symboles = 3 bits/car (-33 %).
 // - index 0-3 : sûrs, préservés par Discord (ZWSP, ZWNJ, ZWJ, word-joiner).
 // - index 4-7 : opérateurs invisibles (même famille Cf que le word-joiner), très
 //   probablement préservés -> activés par la densité 3 bits.
-// Le word-joiner (index 3) sert aussi de délimiteur MARK : il n'apparaît jamais
-// dans une couverture, donc le PREMIER word-joiner marque le début du payload.
-// Juste après le MARK, un caractère d'en-tête code la densité (0 => 2 bits,
-// 1 => 3 bits) : le récepteur la détecte seul, rien à régler de son côté.
+// Le PREMIER symbole rencontré code la densité (0 => 2 bits, 1 => 3 bits) : le
+// récepteur s'adapte seul, rien à régler de son côté.
 const ZW_ALL = ["​", "‌", "‍", "⁠", "⁡", "⁢", "⁣", "⁤"];
 const ZW_VAL = new Map(ZW_ALL.map((c, i) => [c, i]));
-export const MARK = "⁠"; // = ZW_ALL[3]
+
+// Sélecteurs de variation du mode compact (256 valeurs disponibles).
+function byteToVS(b) { return b < 16 ? 0xfe00 + b : 0xe0100 + (b - 16); }
+function vsToByte(cp) {
+    if (cp >= 0xfe00 && cp <= 0xfe0f) return cp - 0xfe00;
+    if (cp >= 0xe0100 && cp <= 0xe01ef) return cp - 0xe0100 + 16;
+    return null;
+}
+
+// Une couverture ne doit porter aucun symbole de l'alphabet utilisé, sinon il
+// se mélangerait au payload une fois dispersé. Conséquence assumée : un emoji
+// composé avec un liant (👨‍👩‍👧) ou un sélecteur (❤️) fourni dans une couverture
+// perso perd sa composition. Les couvertures automatiques n'en contiennent pas.
+function stripHidden(s) {
+    let out = "";
+    for (const ch of s) if (!ZW_VAL.has(ch)) out += ch;
+    return out;
+}
+
+// Indice du premier graphème après lequel on peut poser le payload compact :
+// juste derrière le dernier graphème de la couverture qui porte déjà un
+// sélecteur de variation. Les sélecteurs de « ❤️ » ou « 🏳️‍🌈 » se retrouvent ainsi
+// tous AVANT le MAGIC, donc ignorés par le décodeur — la couverture garde son
+// rendu exact au lieu d'être amputée.
+function firstCompactSlot(cover) {
+    const gs = graphemes(cover);
+    let idx = 0;
+    for (let i = 0; i < gs.length; i++) {
+        for (const ch of gs[i]) {
+            if (vsToByte(ch.codePointAt(0)) !== null) { idx = i + 1; break; }
+        }
+    }
+    return idx;
+}
+
+// Nombre de symboles de chaque alphabet présents dans un message. Sert au
+// pré-filtre du plugin : sans marqueur fixe, c'est la quantité qui trahit un
+// payload, plus sa position.
+export function countHiddenSymbols(message) {
+    let n = 0;
+    for (const ch of message) if (ZW_VAL.has(ch)) n++;
+    return n;
+}
+
+export function countCompactSymbols(message) {
+    let n = 0;
+    for (const ch of message) if (vsToByte(ch.codePointAt(0)) !== null) n++;
+    return n;
+}
+
+function coverFor(cover, pool) {
+    return pickCover(cover, { pool });
+}
 
 // `bits` = 2 (sûr, 4 symboles) ou 3 (dense, 8 symboles). Le flux d'octets est
 // ré-empaqueté en groupes de `bits` bits (pas d'alignement octet requis).
-export async function encodeHidden(text, passphrase, { cover, bits = 3, context = "" } = {}) {
+export async function encodeHidden(text, passphrase, { cover, bits = 3, context = "", padding, pool } = {}) {
     if (bits !== 2 && bits !== 3) bits = 3;
-    const bytes = await encryptBytes(text, passphrase, context);
+    const bytes = await encryptBytes(text, passphrase, context, padding);
     const mask = (1 << bits) - 1;
-    let zw = ZW_ALL[bits - 2]; // en-tête densité (0 => 2 bits, 1 => 3 bits)
+    const syms = [ZW_ALL[bits - 2]]; // en-tête densité, premier symbole émis
     let acc = 0, accBits = 0;
     for (const byte of bytes) {
         acc = (acc << 8) | byte;
         accBits += 8;
         while (accBits >= bits) {
             accBits -= bits;
-            zw += ZW_ALL[(acc >> accBits) & mask];
+            syms.push(ZW_ALL[(acc >> accBits) & mask]);
         }
     }
-    if (accBits > 0) zw += ZW_ALL[(acc << (bits - accBits)) & mask]; // bits de fin (padding)
-    // Retirer tout MARK déjà présent dans la couverture (ex. couverture copiée
-    // depuis un ancien message Papotage) : sinon indexOf(MARK) tomberait dessus.
-    return pickCover(cover).split(MARK).join("") + MARK + zw;
+    if (accBits > 0) syms.push(ZW_ALL[(acc << (bits - accBits)) & mask]); // bits de fin
+    return scatter(stripHidden(coverFor(cover, pool)), syms);
 }
 
-// Renvoie le texte clair, ou null si pas de payload / mauvaise clé / mauvais contexte.
-// La densité est lue dans l'en-tête : le récepteur s'adapte tout seul.
+// Renvoie le texte clair, ou null si pas de payload / mauvaise clé / mauvais
+// contexte. Les symboles sont ramassés dans l'ordre du texte, où qu'ils soient :
+// aucun marqueur de début n'est nécessaire, et du texte ajouté après coup
+// (message édité, signature de bot) ne gêne pas.
 export async function decodeHidden(message, passphrase, { context = "" } = {}) {
-    const at = message.indexOf(MARK);
-    if (at < 0) return null;
-    // On ne garde que les symboles de l'alphabet : du texte ajouté après le
-    // payload (message édité, signature de bot) ne casse plus le décodage.
     const syms = [];
-    for (const ch of message.slice(at + 1)) {
+    for (const ch of message) {
         const v = ZW_VAL.get(ch);
         if (v !== undefined) syms.push(v);
     }
@@ -258,32 +369,24 @@ export async function decodeHidden(message, passphrase, { context = "" } = {}) {
 // ===========================================================================
 // Mode compact (sélecteurs de variation) : 1 octet = 1 caractère invisible,
 // soit ~2,7x plus court que le mode zero-width dense. Les sélecteurs se collent
-// à la dernière lettre visible de la couverture : rendu invisible garanti, pas
-// de carré vide, pas de débordement à la sélection.
+// au caractère visible qui les précède : rendu invisible garanti, pas de carré
+// vide, pas de débordement à la sélection.
 // Contrepartie : encodage moins universel que les zero-width, à réserver aux
 // interlocuteurs qui ont la même version du plugin.
 // ===========================================================================
 const MAGIC = 0xc7;        // 1er octet de la trame : repère le début du payload
-const ATTEMPT_CAP = 32;    // bornes le travail sur une entrée hostile
+const ATTEMPT_CAP = 32;    // borne le travail sur une entrée hostile
 
-function byteToVS(b) { return b < 16 ? 0xfe00 + b : 0xe0100 + (b - 16); }
-function vsToByte(cp) {
-    if (cp >= 0xfe00 && cp <= 0xfe0f) return cp - 0xfe00;
-    if (cp >= 0xe0100 && cp <= 0xe01ef) return cp - 0xe0100 + 16;
-    return null;
-}
-
-export async function encodeCompact(text, passphrase, { cover, context = "" } = {}) {
-    const body = await encryptBytes(text, passphrase, context);
-    let out = pickCover(cover);
-    out += String.fromCodePoint(byteToVS(MAGIC));
-    for (const b of body) out += String.fromCodePoint(byteToVS(b));
-    return out;
+export async function encodeCompact(text, passphrase, { cover, context = "", padding, pool } = {}) {
+    const body = await encryptBytes(text, passphrase, context, padding);
+    const syms = [String.fromCodePoint(byteToVS(MAGIC))];
+    for (const b of body) syms.push(String.fromCodePoint(byteToVS(b)));
+    const base = coverFor(cover, pool) || "ok";
+    return scatter(base, syms, { allowLeading: false, fromGrapheme: firstCompactSlot(base) });
 }
 
 // Renvoie le texte clair, ou null. On collecte tous les sélecteurs de variation
-// dans l'ordre puis on se cale sur le MAGIC : ça tolère un emoji de la couverture
-// qui porterait un sélecteur légitime (❤️ = U+2764 U+FE0F).
+// dans l'ordre puis on se cale sur le MAGIC.
 export async function decodeCompact(message, passphrase, { context = "" } = {}) {
     const bytes = [];
     for (const ch of message) {
@@ -310,8 +413,8 @@ export async function decodeCompact(message, passphrase, { context = "" } = {}) 
 export const EMOJI = ["😀", "😂", "😅", "😍", "🤔", "😎", "😭", "😡", "👍", "🔥", "🎉", "💀", "👀", "🚀", "🍕", "💯"];
 const EMOJI_INDEX = new Map(EMOJI.map((e, i) => [e, i]));
 
-export async function encodeEmoji(text, passphrase, { cover, context = "" } = {}) {
-    const body = await encryptBytes(text, passphrase, context);
+export async function encodeEmoji(text, passphrase, { cover, context = "", padding } = {}) {
+    const body = await encryptBytes(text, passphrase, context, padding);
     let seq = EMOJI[MAGIC >> 4] + EMOJI[MAGIC & 0x0f];
     for (const b of body) seq += EMOJI[b >> 4] + EMOJI[b & 0x0f];
     // La couverture est optionnelle ici : la traînée d'emojis est déjà le message.
@@ -359,5 +462,3 @@ export function parseInput(raw, separator = " | ") {
     if (!cover || !secret.trim()) return { cover: null, secret: raw };
     return { cover, secret };
 }
-
-

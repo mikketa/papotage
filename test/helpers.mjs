@@ -37,3 +37,27 @@ export function makeRng(seed = 1) {
         return x / 0x1_0000_0000;
     };
 }
+
+// Plus longue série CONTIGUË de caractères invisibles : c'est ce que cherche un
+// détecteur générique, donc la métrique à surveiller.
+export function longestInvisibleRun(s) {
+    let best = 0, cur = 0;
+    for (const ch of s) {
+        const cp = ch.codePointAt(0);
+        const inv = (cp >= 0x200b && cp <= 0x200d) || (cp >= 0x2060 && cp <= 0x2064)
+            || (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef);
+        cur = inv ? cur + 1 : 0;
+        if (cur > best) best = cur;
+    }
+    return best;
+}
+
+// Vrai si tous les points de code de `needle` apparaissent dans `hay` dans le
+// même ordre : prouve qu'une couverture n'a été ni amputée ni réordonnée, même
+// si des symboles ont été insérés au milieu.
+export function isSubsequence(needle, hay) {
+    const want = [...needle];
+    let i = 0;
+    for (const ch of hay) if (i < want.length && ch === want[i]) i++;
+    return i === want.length;
+}

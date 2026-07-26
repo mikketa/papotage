@@ -5,11 +5,14 @@
 // câblage (boutons, événements Flux, toasts).
 
 import {
-    EMOJI, MARK,
+    EMOJI, PADDING,
+    countCompactSymbols, countHiddenSymbols,
     decodeCompact, decodeEmoji, decodeHidden,
     encodeCompact, encodeEmoji, encodeHidden,
     parseInput
 } from "./codec.mjs";
+
+export { PADDING };
 
 export const MODE = {
     HIDDEN: "hidden",     // zero-width 3 bits/car (défaut)
@@ -50,7 +53,9 @@ export async function encodeOutgoing({
     defaultCover = "",
     separator = DEFAULT_SEPARATOR,
     context = "",
-    maxChars = MAX_MESSAGE_CHARS
+    maxChars = MAX_MESSAGE_CHARS,
+    padding = PADDING.BLOCK,
+    pool = []
 }) {
     if (!passphrase) {
         throw new PapotageError("no-passphrase",
@@ -67,20 +72,21 @@ export async function encodeOutgoing({
     }
     const chosenCover = cover ?? (defaultCover.trim() || undefined);
 
+    const opts = { cover: chosenCover, context, padding, pool };
     let content;
     try {
         switch (mode) {
             case MODE.EMOJI:
-                content = await encodeEmoji(secret, passphrase, { cover: chosenCover, context });
+                content = await encodeEmoji(secret, passphrase, opts);
                 break;
             case MODE.COMPACT:
-                content = await encodeCompact(secret, passphrase, { cover: chosenCover, context });
+                content = await encodeCompact(secret, passphrase, opts);
                 break;
             case MODE.HIDDEN_SAFE:
-                content = await encodeHidden(secret, passphrase, { cover: chosenCover, bits: 2, context });
+                content = await encodeHidden(secret, passphrase, { ...opts, bits: 2 });
                 break;
             default:
-                content = await encodeHidden(secret, passphrase, { cover: chosenCover, bits: 3, context });
+                content = await encodeHidden(secret, passphrase, { ...opts, bits: 3 });
         }
     } catch (e) {
         throw new PapotageError("encode-failed",
@@ -106,33 +112,29 @@ export async function encodeOutgoing({
 // à voir avec Papotage. Évite de lancer un déchiffrement sur chaque message du
 // salon (le scan d'un historique en traite des centaines).
 
-// Chaque filtre exige une *série* de symboles, jamais un symbole isolé. C'est
-// ce qui distingue un payload d'un caractère exotique qui traîne dans un message
-// ordinaire — et ça compte deux fois :
-//   - à la réception, ça évite de lancer un déchiffrement sur chaque message ;
+// Depuis que le payload est dispersé dans la couverture, il n'y a plus ni
+// marqueur de début ni traînée d'un seul tenant à chercher : on compte les
+// symboles présents dans tout le message.
+//
+// Ces seuils comptent deux fois :
+//   - à la réception, ils évitent de lancer un déchiffrement sur chaque message ;
 //   - à l'envoi, `isPapotageMessage` sert à ne pas re-chiffrer un message déjà
 //     chiffré. Un faux positif là-dessus enverrait le message EN CLAIR.
-// La plus petite trame possible fait 44 octets, soit 118 caractères invisibles
-// en densité 3 bits : les seuils ci-dessous gardent une marge confortable.
+// La plus petite trame possible fait 44 octets, soit 119 symboles invisibles en
+// densité 3 bits, 45 en mode compact, 90 emojis en mode emoji. Les seuils
+// gardent une marge sous ces minimums, tout en restant très au-dessus de ce
+// qu'un humain peut taper ou coller par accident.
+const MIN_HIDDEN = 64;
+const MIN_COMPACT = 40;
 
-// MARK suivi d'une vraie traînée de zero-width (et pas d'un U+2060 collé depuis
-// une page web au milieu d'une phrase). Écrit en échappements : un caractère
-// invisible littéral dans une expression régulière est illisible et se perd au
-// premier copier-coller.
-const HIDDEN_RUN = new RegExp(`${MARK}[\\u200B-\\u200D\\u2060-\\u2064]{32,}`, "u");
-
-// Un ❤️ isolé contient un sélecteur de variation parfaitement légitime ; une
-// trame Papotage en aligne au moins 45.
-const VS_RUN = /(?:[\u{FE00}-\u{FE0F}]|[\u{E0100}-\u{E01EF}]){24,}/u;
-
-// Un vrai payload emoji fait au moins 90 emojis : exiger une série évite de
-// réagir à un simple 👍 dans une phrase.
-const EMOJI_RUN = new RegExp(`[${EMOJI.join("")}]{16,}`, "u");
+// Le mode emoji, lui, produit bien une série contiguë : un run reste le bon
+// filtre, et il évite de réagir à un simple 👍 dans une phrase.
+const EMOJI_RUN = new RegExp(`[${EMOJI.join("")}]{32,}`, "u");
 
 export function detectMode(content) {
     if (!content) return null;
-    if (HIDDEN_RUN.test(content)) return MODE.HIDDEN; // couvre aussi HIDDEN_SAFE
-    if (VS_RUN.test(content)) return MODE.COMPACT;
+    if (countHiddenSymbols(content) >= MIN_HIDDEN) return MODE.HIDDEN; // couvre HIDDEN_SAFE
+    if (countCompactSymbols(content) >= MIN_COMPACT) return MODE.COMPACT;
     if (EMOJI_RUN.test(content)) return MODE.EMOJI;
     return null;
 }

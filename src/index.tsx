@@ -20,12 +20,14 @@ import definePlugin, { OptionType } from "@utils/types";
 import { FluxDispatcher, MessageStore, SelectedChannelStore, Toasts, useState } from "@webpack/common";
 
 import { forgetKeys, warmKey } from "./codec.mjs";
+import { parseCoverPool } from "./covers.mjs";
 import {
     decodeIncoming,
     encodeOutgoing,
     isPapotageMessage,
     LOCK_PREFIX,
     MODE,
+    PADDING,
     PapotageError,
     SeenCache,
     stripLockPrefix
@@ -66,6 +68,18 @@ const settings = definePluginSettings({
         description: "Phrase de couverture perso par défaut (vide = phrase naturelle aléatoire)",
         default: ""
     },
+    coverPool: {
+        type: OptionType.STRING,
+        description: "Tes propres phrases de couverture, séparées par ';' "
+            + "(le pool intégré est public, donc connu de qui lit le code)",
+        default: ""
+    },
+    lengthHiding: {
+        type: OptionType.BOOLEAN,
+        description: "Masquer la longueur : rembourre par paliers au lieu de blocs de 16 octets. "
+            + "Plus discret, mais les messages courts deviennent nettement plus longs",
+        default: false
+    },
     separator: {
         type: OptionType.STRING,
         description: "Séparateur 'couverture | secret' pour écrire soi-même la phrase visible",
@@ -79,6 +93,19 @@ const enabledChannels = new Set<string>();
 
 function toast(type: any, message: string) {
     Toasts.show({ id: Toasts.genId(), type, message });
+}
+
+// Réglages d'encodage, résolus au moment de l'envoi (l'utilisateur peut les
+// changer en cours de session).
+function encodeSettings() {
+    return {
+        passphrase: settings.store.passphrase,
+        mode: settings.store.mode,
+        defaultCover: settings.store.customCover ?? "",
+        separator: settings.store.separator,
+        pool: parseCoverPool(settings.store.coverPool),
+        padding: settings.store.lengthHiding ? PADDING.BUCKET : PADDING.BLOCK
+    };
 }
 
 // --- Icône cadenas ----------------------------------------------------------
@@ -232,14 +259,7 @@ export default definePlugin({
             if (isPapotageMessage(msg.content)) return; // déjà chiffré : ne pas ré-encoder
 
             try {
-                msg.content = await encodeOutgoing({
-                    raw: msg.content,
-                    passphrase: settings.store.passphrase,
-                    mode: settings.store.mode,
-                    defaultCover: settings.store.customCover ?? "",
-                    separator: settings.store.separator,
-                    context: channelId
-                });
+                msg.content = await encodeOutgoing({ ...encodeSettings(), raw: msg.content, context: channelId });
             } catch (e) {
                 const m = e instanceof PapotageError ? e.message
                     : `Papotage : échec inattendu (${(e as any)?.message ?? e}). Message NON envoyé.`;
@@ -256,12 +276,7 @@ export default definePlugin({
             if (!decrypted.has(messageId)) return;
             try {
                 msg.content = await encodeOutgoing({
-                    raw: stripLockPrefix(msg.content),
-                    passphrase: settings.store.passphrase,
-                    mode: settings.store.mode,
-                    defaultCover: settings.store.customCover ?? "",
-                    separator: settings.store.separator,
-                    context: channelId
+                    ...encodeSettings(), raw: stripLockPrefix(msg.content), context: channelId
                 });
             } catch (e) {
                 const why = e instanceof PapotageError ? e.message : String((e as any)?.message ?? e);

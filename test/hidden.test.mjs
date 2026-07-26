@@ -28,11 +28,12 @@ test("message normal sans payload => null", async () => {
     assert.equal(await decodeHidden("salut ça va les gars ?", PASS, { context: CTX }), null);
 });
 
-test("une couverture contenant un word-joiner ne piège pas le délimiteur", async () => {
-    // Régression : le MARK délimiteur EST U+2060 ; un U+2060 dans la couverture
-    // (texte copié, ancien message réutilisé) cassait indexOf(MARK).
+test("une couverture contenant déjà des invisibles ne corrompt pas le payload", async () => {
+    // Texte copié depuis une page web, ancien message réutilisé : les symboles
+    // parasites sont retirés de la couverture avant dispersion, sinon ils se
+    // mélangeraient au flux de données.
     const clair = "mon secret";
-    const coverSale = "salut⁠ça va";
+    const coverSale = "salut\u2060ça\u200bva\u200d bien";
     for (const bits of [2, 3]) {
         const msg = await encodeHidden(clair, PASS, { cover: coverSale, bits, context: CTX });
         assert.equal(await decodeHidden(msg, PASS, { context: CTX }), clair, `bits=${bits}`);

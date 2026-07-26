@@ -9,8 +9,9 @@ invisible. Sans le plugin, un message ressemble à une réponse quelconque
 1. Le message est chiffré en AES-GCM 256. La clé est dérivée du mot de passe partagé
    (PBKDF2-SHA256, 600 000 itérations) **et de l'identifiant du salon** : le même mot
    de passe donne une clé différente dans chaque conversation.
-2. Les octets chiffrés sont encodés en caractères Unicode invisibles, accrochés
-   derrière une courte phrase de couverture. Discord les préserve.
+2. Les octets chiffrés sont encodés en caractères Unicode invisibles, **dispersés
+   dans** une courte phrase de couverture plutôt que collés à la fin. Discord les
+   préserve.
 3. À la réception, le plugin repère la partie invisible, la déchiffre et remplace le
    contenu affiché par le vrai message. Les autres ne voient que la couverture.
 
@@ -21,9 +22,12 @@ Le chiffrement s'active salon par salon avec le cadenas de la barre de message
 
 - **Mot de passe** : à définir dans les réglages du plugin, identique chez tous les
   participants. À transmettre par un autre canal.
-- **Phrase de couverture** : par défaut une phrase est tirée au hasard parmi plus de
-  500 combinaisons. Pour écrire soi-même la façade et garder une conversation
-  cohérente, utiliser `phrase visible | message secret`.
+- **Phrase de couverture** : par défaut une phrase est composée au hasard parmi plus
+  de 1 100 combinaisons, avec des formes variées (du « ok » sec à la question) et une
+  mémoire qui évite de répéter la même phrase à quelques messages d'écart. Le pool
+  intégré étant public, le réglage *Cover Pool* permet d'utiliser ses propres phrases.
+  Pour écrire soi-même la façade et garder une conversation cohérente, utiliser
+  `phrase visible | message secret`.
   Exemple : `ouais tranquille et toi ? | rdv à 20h` affiche « ouais tranquille et
   toi ? » pour tout le monde, et le vrai message pour ceux qui ont le plugin.
 
@@ -36,15 +40,17 @@ Le chiffrement s'active salon par salon avec le cadenas de la barre de message
 | Auto Decrypt | Déchiffrer automatiquement les messages reçus |
 | Show 🔓 | Préfixer les messages déchiffrés pour les repérer |
 | Custom Cover | Phrase de couverture par défaut |
+| Cover Pool | Tes propres phrases de couverture, séparées par `;` (le pool intégré est public) |
+| Length Hiding | Rembourre par paliers au lieu de blocs de 16 o : masque la longueur, coûte de la place |
 | Separator | Délimiteur entre couverture et secret (par défaut ` &#124; `) |
 
 ### Modes d'encodage
 
 | Mode | Coût par octet | Capacité (1 message) | Remarque |
 |---|---|---|---|
-| **Invisible dense** (défaut) | 2,67 car. | ≈ 890 car. de secret | 8 symboles zero-width |
+| **Invisible dense** (défaut) | 2,67 car. | ≈ 865 car. de secret | 8 symboles zero-width |
 | Invisible sûr | 4 car. | ≈ 550 car. | 4 symboles seulement, le jeu le plus universel |
-| Compact | 1 car. | ≈ 1 260 car. | Sélecteurs de variation, accrochés à la couverture |
+| Compact | 1 car. | ≈ 1 225 car. | Sélecteurs de variation, accrochés à la couverture |
 | Emoji | 2 emojis | ≈ 550 car. | Visible et bizarre : réservé aux messages courts |
 
 Capacités **mesurées** sur du texte aléatoire (le pire cas) avec la plus longue
@@ -60,9 +66,12 @@ exact : le message n'est jamais avalé silencieusement par Discord.
   individuel, pas de confidentialité persistante (*forward secrecy*).
 - **Métadonnées** : Discord voit toujours qui parle à qui et quand. Seul le contenu
   est caché.
-- **Détectabilité** : invisible à la lecture, mais un scan automatique repère la
-  présence de caractères zero-width (sans pouvoir lire le contenu chiffré). La
-  longueur du message reste observable, arrondie par blocs de 16 octets.
+- **Détectabilité** : invisible à la lecture. Un scan qui *compte* les caractères
+  invisibles d'un message les trouvera toujours — c'est une limite de fond, pas un
+  réglage. Ce qui a été supprimé, ce sont les signatures faciles : plus de marqueur
+  fixe annonçant le payload, et plus de traînée d'un seul tenant (sur un secret de
+  200 caractères, la plus longue série contiguë passe de 588 symboles à 90). La
+  longueur du message reste corrélée à celle du secret, sauf en mode paliers.
 - **Confiance dans le client** : le texte est en clair dans le client au moment où on
   le tape, et le mot de passe est stocké en clair dans les réglages Vencord
   (`settings.json`).
@@ -71,9 +80,9 @@ exact : le message n'est jamais avalé silencieusement par Discord.
 
 ## Compatibilité
 
-Le format **v2 est incompatible avec la v1** : tous les participants doivent mettre à
-jour en même temps. Un message v1 reçu par un plugin v2 (et l'inverse) reste affiché
-comme une phrase banale, il ne se déchiffre pas.
+Le format **v3 est incompatible avec v1 et v2** : tous les participants doivent mettre
+à jour en même temps. Un message d'une autre version reste affiché comme une phrase
+banale, il ne se déchiffre pas.
 
 ## Installation
 
@@ -94,14 +103,16 @@ se teste en local :
 npm test        # Node >= 20
 ```
 
-82 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
-salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), et les
-règles d'envoi du plugin.
+99 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
+salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), les
+règles d'envoi du plugin, et les propriétés de discrétion (absence de marqueur fixe,
+dispersion du payload, intégrité des emojis de couverture, variété des phrases).
 
 ## Structure
 
-- `src/codec.mjs` — chiffrement AES-GCM et encodages (invisible, compact, emoji)
+- `src/codec.mjs` — chiffrement AES-GCM, encodages (invisible, compact, emoji) et dispersion
 - `src/covers.mjs` — génération des phrases de couverture
+- `src/random.mjs` — tirage aléatoire uniforme partagé
 - `src/plugin-core.mjs` — règles d'envoi et de réception, sans dépendance Vencord
 - `src/index.tsx` — câblage Vencord (bouton, événements, toasts)
 - `test/` — suite de tests (`node:test`)
