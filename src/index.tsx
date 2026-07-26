@@ -2,24 +2,54 @@
  * Papotage — plugin Vencord.
  * Chiffre les messages et cache le résultat : l'outsider voit une phrase banale
  * (ou des emojis), toi (avec le plugin + la clé) tu vois le vrai texte à la place.
+ *
+ * Ce fichier ne fait que du câblage Vencord. Toute la logique testable est dans
+ * `plugin-core.mjs` et `codec.mjs`.
  */
 
 import { addChatBarButton, ChatBarButton, ChatBarButtonFactory, removeChatBarButton } from "@api/ChatButtons";
-import { addMessagePreSendListener, removeMessagePreSendListener } from "@api/MessageEvents";
+import {
+    addMessagePreEditListener,
+    addMessagePreSendListener,
+    removeMessagePreEditListener,
+    removeMessagePreSendListener
+} from "@api/MessageEvents";
 import { updateMessage } from "@api/MessageUpdater";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
 import { FluxDispatcher, MessageStore, SelectedChannelStore, Toasts, useState } from "@webpack/common";
 
-import { decodeEmoji, decodeHidden, encodeEmoji, encodeHidden, parseInput, warmKey } from "./codec.mjs";
-
-const MARK = "⁠"; // marqueur zero-width : signale un message déjà chiffré
+import { forgetKeys, warmKey } from "./codec.mjs";
+import {
+    decodeIncoming,
+    encodeOutgoing,
+    isPapotageMessage,
+    LOCK_PREFIX,
+    MODE,
+    PapotageError,
+    SeenCache,
+    stripLockPrefix
+} from "./plugin-core.mjs";
 
 const settings = definePluginSettings({
     passphrase: {
         type: OptionType.STRING,
         description: "Mot de passe partagé (identique chez tous les participants)",
         default: ""
+    },
+    mode: {
+        type: OptionType.SELECT,
+        description: "Encodage du secret",
+        options: [
+            {
+                label: "Invisible dense — recommandé (caractères zero-width, 3 bits/car)",
+                value: MODE.HIDDEN,
+                default: true
+            },
+            { label: "Invisible sûr — jeu de caractères minimal, messages plus longs", value: MODE.HIDDEN_SAFE },
+            { label: "Compact — le plus court (sélecteurs de variation)", value: MODE.COMPACT },
+            { label: "Emoji — visible et bizarre, pour messages courts", value: MODE.EMOJI }
+        ]
     },
     autoDecrypt: {
         type: OptionType.BOOLEAN,
@@ -40,21 +70,16 @@ const settings = definePluginSettings({
         type: OptionType.STRING,
         description: "Séparateur 'couverture | secret' pour écrire soi-même la phrase visible",
         default: " | "
-    },
-    emojiMode: {
-        type: OptionType.BOOLEAN,
-        description: "Mode emoji : les emojis visibles portent le secret (visible mais codé, pour messages courts)",
-        default: false
-    },
-    denseMode: {
-        type: OptionType.BOOLEAN,
-        description: "Encodage dense : ~33 % de caractères invisibles en moins (le contact doit avoir la même version du plugin)",
-        default: true
     }
 });
 
-// Salons où le chiffrement est activé (réinitialisé au rechargement de Discord).
+// Salons où le chiffrement est activé (réinitialisé au rechargement de Discord :
+// on préfère un cadenas qui retombe sur « off » à un cadenas qu'on croit à tort actif).
 const enabledChannels = new Set<string>();
+
+function toast(type: any, message: string) {
+    Toasts.show({ id: Toasts.genId(), type, message });
+}
 
 // --- Icône cadenas ----------------------------------------------------------
 function LockIcon({ on }: { on: boolean; }) {
@@ -73,69 +98,91 @@ const PapotageButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
     const [on, setOn] = useState(enabledChannels.has(channel.id));
     if (!isMainChat) return null;
 
+    // Cadenas vert mais pas de mot de passe = rien ne peut être chiffré. On le
+    // signale (orange + tooltip) au lieu de laisser croire que c'est protégé.
+    const armed = on && !!settings.store.passphrase;
+    const color = !on ? "var(--interactive-normal)"
+        : armed ? "var(--green-360)" : "var(--yellow-300)";
+
     const toggle = () => {
         if (enabledChannels.has(channel.id)) enabledChannels.delete(channel.id);
-        else enabledChannels.add(channel.id);
+        else {
+            enabledChannels.add(channel.id);
+            if (!settings.store.passphrase) {
+                toast(Toasts.Type.MESSAGE, "Papotage : définis un mot de passe dans les réglages du plugin.");
+            }
+        }
         setOn(enabledChannels.has(channel.id));
     };
 
+    const tooltip = !on ? "Papotage désactivé"
+        : armed ? "Papotage activé (messages chiffrés)"
+            : "Papotage armé mais SANS mot de passe — les envois seront bloqués";
+
     return (
-        <ChatBarButton
-            tooltip={on ? "Papotage activé (messages chiffrés)" : "Papotage désactivé"}
-            onClick={toggle}
-        >
-            <div style={{ color: on ? "var(--green-360)" : "var(--interactive-normal)", display: "flex" }}>
+        <ChatBarButton tooltip={tooltip} onClick={toggle}>
+            <div style={{ color, display: "flex" }}>
                 <LockIcon on={on} />
             </div>
         </ChatBarButton>
     );
 };
 
-// Filtre rapide du mode emoji. Un vrai payload emoji est une longue suite
-// d'emojis du dico (2 par octet, donc des dizaines) ; on exige un run pour ne PAS
-// lancer le décodage sur un message normal qui contient juste un 😂 ou un 👍.
-const EMOJI_RUN_RE = /[😀😂😅😍🤔😎😭😡👍🔥🎉💀👀🚀🍕💯]{16,}/u;
-const inFlight = new Set<string>();       // déchiffrements simultanés (anti-doublon)
-const decided = new Map<string, string>(); // messageId -> contenu déjà traité (anti-rejeu)
-let lastPass = "";                         // si le mot de passe change, on réessaie tout
+// --- Déchiffrement ----------------------------------------------------------
+const inFlight = new Set<string>();  // déchiffrements simultanés (anti-doublon)
+const seen = new SeenCache();        // messageId -> contenu déjà traité (borné, évincé)
+let lastPass = "";                   // si le mot de passe change, on réessaie tout
 
-// --- Déchiffrement : remplace le contenu affiché par le vrai message ---------
+// Messages dont on a remplacé le contenu affiché par le clair. Volontairement
+// SANS limite de taille et jamais vidé en cours de session : oublier une entrée
+// ici, c'est perdre la protection à l'édition sur un message dont le store
+// contient le secret en clair. Ce ne sont que des identifiants.
+const decrypted = new Set<string>();
+
+function passphraseChanged(pass: string) {
+    if (pass === lastPass) return;
+    lastPass = pass;
+    seen.clear();   // retenter le déchiffrement de tout le salon avec la nouvelle clé
+    forgetKeys();
+    // `decrypted` n'est PAS vidé : les messages déjà affichés en clair le restent,
+    // et leur édition doit continuer d'être interceptée.
+}
+
 async function tryDecrypt(channelId: string, messageId: string, content: string) {
     if (!settings.store.autoDecrypt) return;
     const pass = settings.store.passphrase;
+    passphraseChanged(pass);
     if (!pass || !content) return;
-    if (pass !== lastPass) { decided.clear(); lastPass = pass; }
     // Dédoublonnage AVANT le pré-filtre : un message déjà traité (échec compris,
-    // ou contenu déjà remplacé) ne relance ni la regex ni le décrypt aux re-scans.
-    if (inFlight.has(messageId) || decided.get(messageId) === content) return;
-
-    const hasMark = content.includes(MARK);
-    if (!hasMark && !EMOJI_RUN_RE.test(content)) return; // clairement pas chiffré
+    // ou contenu déjà remplacé) ne relance ni la détection ni le déchiffrement.
+    if (inFlight.has(messageId) || seen.has(messageId, content)) return;
 
     inFlight.add(messageId);
     try {
-        const txt = hasMark ? await decodeHidden(content, pass) : await decodeEmoji(content, pass);
-        if (decided.size > 5000) {           // éviction des 1000 plus anciens (Map = ordre d'insertion),
-            let n = 1000;                    // au lieu d'un vidage total qui re-déchiffre tout ensuite
-            for (const k of decided.keys()) { decided.delete(k); if (--n === 0) break; }
-        }
-        decided.set(messageId, content);
-        if (txt != null) {
-            const shown = settings.store.showLock ? `🔓 ${txt}` : txt;
-            decided.set(messageId, shown); // le contenu remplacé ne repassera pas le filtre
-            updateMessage(channelId, messageId, { content: shown });
-        }
+        // Le contexte = le salon : la clé diffère d'une conversation à l'autre.
+        const txt = await decodeIncoming({ content, passphrase: pass, context: channelId });
+        seen.set(messageId, content);
+        if (txt == null) return;
+        const shown = settings.store.showLock ? LOCK_PREFIX + txt : txt;
+        seen.set(messageId, shown); // le contenu remplacé ne repassera pas le filtre
+        decrypted.add(messageId);
+        updateMessage(channelId, messageId, { content: shown });
     } finally {
         inFlight.delete(messageId);
     }
 }
+
+// Les événements Flux appellent tryDecrypt sans l'attendre : une exception
+// inattendue ne doit pas remonter en unhandled rejection.
+const decryptLater = (channelId: string, messageId: string, content: string) =>
+    void tryDecrypt(channelId, messageId, content).catch(() => { });
 
 function scanChannel(channelId?: string) {
     if (!channelId) return;
     try {
         const store: any = MessageStore.getMessages(channelId);
         const arr: any[] = store?.toArray?.() ?? store?._array ?? (Array.isArray(store) ? store : []);
-        for (const m of arr) if (m?.content) tryDecrypt(channelId, m.id, m.content);
+        for (const m of arr) if (m?.content) decryptLater(channelId, m.id, m.content);
     } catch { /* ignore */ }
 }
 
@@ -143,9 +190,14 @@ function scanCurrent() {
     try { scanChannel(SelectedChannelStore.getChannelId()); } catch { /* ignore */ }
 }
 
-const onCreate = (e: any) => { const m = e?.message; if (m?.content) tryDecrypt(m.channel_id, m.id, m.content); };
-const onUpdate = (e: any) => { const m = e?.message; if (m?.content) tryDecrypt(m.channel_id, m.id, m.content); };
-const onSelect = (e: any) => scanChannel(e?.channelId);
+const onCreate = (e: any) => { const m = e?.message; if (m?.content) decryptLater(m.channel_id, m.id, m.content); };
+const onUpdate = (e: any) => { const m = e?.message; if (m?.content) decryptLater(m.channel_id, m.id, m.content); };
+const onSelect = (e: any) => {
+    // Pré-dérive la clé du salon ouvert : PBKDF2 600k coûte ~300 ms, autant les
+    // payer avant le premier message plutôt que pendant.
+    if (e?.channelId) warmKey(settings.store.passphrase, e.channelId);
+    scanChannel(e?.channelId);
+};
 // LOAD_MESSAGES_SUCCESS est émis par page d'historique : ne traiter que la page
 // chargée (et pas tout le salon à chaque fois), sinon le scroll d'historique est
 // quadratique. Repli sur un scan complet si le payload ne porte pas les messages.
@@ -153,13 +205,14 @@ const onLoad = (e: any) => {
     if (!e?.channelId) return;
     const msgs = e?.messages;
     if (Array.isArray(msgs) && msgs.length) {
-        for (const m of msgs) if (m?.content) tryDecrypt(e.channelId, m.id, m.content);
+        for (const m of msgs) if (m?.content) decryptLater(e.channelId, m.id, m.content);
     } else {
         scanChannel(e.channelId);
     }
 };
 
 let preSend: any;
+let preEdit: any;
 let scanTimers: any[] = []; // timers de scan différés, à annuler au stop()
 
 export default definePlugin({
@@ -170,43 +223,61 @@ export default definePlugin({
     settings,
 
     start() {
+        // --- Envoi : fail-closed -------------------------------------------
+        // Toute erreur annule l'envoi. Le mode dégradé « on envoie quand même »
+        // publierait le secret en clair, ce qui est pire que ne rien envoyer.
         preSend = addMessagePreSendListener(async (channelId, msg) => {
             if (!enabledChannels.has(channelId)) return;
-            const pass = settings.store.passphrase;
-            if (!pass || !msg.content) return;
-            if (msg.content.includes(MARK)) return; // déjà chiffré : ne pas ré-encoder
+            if (!msg.content) return;
+            if (isPapotageMessage(msg.content)) return; // déjà chiffré : ne pas ré-encoder
 
-            // un séparateur vide ou fait uniquement d'espaces découperait tous les
-            // messages normaux -> repli sur " | " dans ce cas.
-            const sep = settings.store.separator?.trim() ? settings.store.separator : " | ";
-            const { cover, secret } = parseInput(msg.content, sep);
-            if (!secret) return;
-            const chosenCover = cover ?? (settings.store.customCover || undefined);
-
-            const encoded = settings.store.emojiMode
-                ? await encodeEmoji(secret, pass, chosenCover)
-                : await encodeHidden(secret, pass, chosenCover, settings.store.denseMode ? 3 : 2);
-
-            // Discord rejette silencieusement > 2000 caractères : prévenir au lieu
-            // de laisser le message ne pas partir sans explication.
-            if (encoded.length > 2000) {
-                Toasts.show({
-                    id: Toasts.genId(),
-                    type: Toasts.Type.FAILURE,
-                    message: "Papotage : secret trop long pour un seul message (max ~480 caractères)."
+            try {
+                msg.content = await encodeOutgoing({
+                    raw: msg.content,
+                    passphrase: settings.store.passphrase,
+                    mode: settings.store.mode,
+                    defaultCover: settings.store.customCover ?? "",
+                    separator: settings.store.separator,
+                    context: channelId
                 });
+            } catch (e) {
+                const m = e instanceof PapotageError ? e.message
+                    : `Papotage : échec inattendu (${(e as any)?.message ?? e}). Message NON envoyé.`;
+                toast(Toasts.Type.FAILURE, m);
+                return { cancel: true };
             }
-            msg.content = encoded;
         });
 
-        addChatBarButton("papotage", PapotageButton, ({ ...props }) => <LockIcon on={false} {...props} />);
+        // --- Édition : ne jamais republier le clair -------------------------
+        // On a remplacé le contenu affiché par le texte déchiffré : la boîte
+        // d'édition est donc pré-remplie avec le SECRET. Sans ce garde-fou,
+        // éditer un message revient à le publier en clair dans le salon.
+        preEdit = addMessagePreEditListener(async (channelId, messageId, msg) => {
+            if (!decrypted.has(messageId)) return;
+            try {
+                msg.content = await encodeOutgoing({
+                    raw: stripLockPrefix(msg.content),
+                    passphrase: settings.store.passphrase,
+                    mode: settings.store.mode,
+                    defaultCover: settings.store.customCover ?? "",
+                    separator: settings.store.separator,
+                    context: channelId
+                });
+            } catch (e) {
+                const why = e instanceof PapotageError ? e.message : String((e as any)?.message ?? e);
+                toast(Toasts.Type.FAILURE, `Papotage : édition annulée, le texte serait parti en clair. ${why}`);
+                return { cancel: true };
+            }
+        });
+
+        addChatBarButton("papotage", PapotageButton);
 
         FluxDispatcher.subscribe("MESSAGE_CREATE", onCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onUpdate);
         FluxDispatcher.subscribe("CHANNEL_SELECT", onSelect);
         FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onLoad);
 
-        warmKey(settings.store.passphrase); // pré-dérive la clé (1er déchiffrement instantané)
+        try { warmKey(settings.store.passphrase, SelectedChannelStore.getChannelId()); } catch { /* ignore */ }
 
         // déchiffrer l'historique déjà affiché (ex. après un Ctrl+R, salon déjà ouvert)
         scanCurrent();
@@ -215,6 +286,7 @@ export default definePlugin({
 
     stop() {
         removeMessagePreSendListener(preSend);
+        removeMessagePreEditListener(preEdit);
         removeChatBarButton("papotage");
         scanTimers.forEach(clearTimeout);
         scanTimers = [];
@@ -222,5 +294,8 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onUpdate);
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", onSelect);
         FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onLoad);
+        seen.clear();
+        decrypted.clear();
+        forgetKeys(); // ne pas laisser traîner les clés dérivées après un stop
     }
 });

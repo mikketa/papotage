@@ -1,15 +1,18 @@
 {
     "name": "papotage",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "Plugin Vencord qui chiffre les messages Discord et les cache dans du texte invisible ou des emojis.",
     "type": "module",
+    "engines": {
+        "node": ">=20"
+    },
     "scripts": {
-        "test": "node test/roundtrip.mjs && node test/hidden.mjs && node test/dense.mjs && node test/emoji.mjs && node test/compress.mjs"
+        "test": "node --test"
     },
     "author": "zefarie",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/zefarie/papotage"
+        "url": "https://github.com/mikketa/papotage"
     }
 }
