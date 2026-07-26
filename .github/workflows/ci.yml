@@ -8,10 +8,31 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json annonce Node >= 20 : on vérifie les deux bouts de la plage.
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Tests (chiffrement, stéganographie, logique du plugin)
+        run: npm test
+
+  syntax:
+    # Le plugin lui-même n'est compilable que dans l'arbre Vencord ; on vérifie
+    # au moins qu'il ne part pas en production avec une erreur de syntaxe.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Tests du codec (chiffrement + stéganographie)
-        run: npm test
+      - name: Contrôle syntaxique du plugin
+        run: >
+          npx --yes esbuild@0.24 src/index.tsx
+          --loader:.tsx=tsx --jsx=automatic --bundle --outfile=/dev/null
+          '--external:@api/*' '--external:@utils/*' '--external:@webpack/*'
+          '--external:react/jsx-runtime'
