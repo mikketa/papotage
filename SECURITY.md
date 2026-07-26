@@ -106,6 +106,23 @@ d'un texte que seul l'expéditeur compose. Le padding par blocs de 16 octets ré
 encore le signal. Le compromis est assumé, mais il est réel : ne collez pas dans un
 message Papotage du texte fourni par quelqu'un d'autre à côté d'un secret.
 
+## Vérification de bout en bout
+
+Le codec repose sur une hypothèse qu'aucun test local ne peut confirmer : que
+Discord conserve intégralement les caractères invisibles d'un message, y compris
+insérés au milieu d'un texte. Seul un aller-retour par ses serveurs peut trancher.
+
+Le plugin ne la suppose donc pas, il la mesure. Chaque message chiffré envoyé est
+retenu ; quand Discord le renvoie (`MESSAGE_CREATE`), il est comparé à l'original.
+S'il diffère, l'expéditeur est prévenu immédiatement : le destinataire ne pourra pas
+le lire. Le secret n'est pas exposé pour autant — un message altéré n'est plus
+déchiffrable, il ne devient pas lisible.
+
+La comparaison exige l'identité de l'auteur. Un message dépouillé de tous ses
+caractères invisibles est indiscernable d'un message où quelqu'un d'autre aurait
+simplement tapé la même phrase que notre couverture : sans vérifier que le message
+vient bien de nous, l'alerte se déclencherait à tort.
+
 ## Fail-closed
 
 Le plugin annule l'envoi plutôt que de publier en clair, dans tous les cas suivants :

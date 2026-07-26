@@ -14,6 +14,9 @@ invisible. Sans le plugin, un message ressemble à une réponse quelconque
    préserve.
 3. À la réception, le plugin repère la partie invisible, la déchiffre et remplace le
    contenu affiché par le vrai message. Les autres ne voient que la couverture.
+4. Chaque message envoyé est comparé à celui que Discord renvoie. S'il a été modifié
+   en route, l'expéditeur est prévenu tout de suite : le destinataire ne pourra pas
+   le lire.
 
 Le chiffrement s'active salon par salon avec le cadenas de la barre de message
 (gris = off, vert = on, orange = armé mais sans mot de passe).
@@ -40,7 +43,7 @@ Le chiffrement s'active salon par salon avec le cadenas de la barre de message
 | Auto Decrypt | Déchiffrer automatiquement les messages reçus |
 | Show 🔓 | Préfixer les messages déchiffrés pour les repérer |
 | Custom Cover | Phrase de couverture par défaut |
-| Cover Pool | Tes propres phrases de couverture, séparées par `;` (le pool intégré est public) |
+| Cover Pool | Tes propres phrases de couverture, une par ligne (le pool intégré est public) |
 | Length Hiding | Rembourre par paliers au lieu de blocs de 16 o : masque la longueur, coûte de la place |
 | Separator | Délimiteur entre couverture et secret (par défaut ` &#124; `) |
 
@@ -103,10 +106,16 @@ se teste en local :
 npm test        # Node >= 20
 ```
 
-99 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
+104 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
 salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), les
-règles d'envoi du plugin, et les propriétés de discrétion (absence de marqueur fixe,
-dispersion du payload, intégrité des emojis de couverture, variété des phrases).
+règles d'envoi du plugin, les propriétés de discrétion (absence de marqueur fixe,
+dispersion du payload, intégrité des emojis de couverture, variété des phrases) et la
+détection d'un message altéré par Discord.
+
+Les API Vencord utilisées (`addChatBarButton`, `addMessagePreSendListener`,
+`addMessagePreEditListener`, `updateMessage`, `OptionType.SELECT`, `Toasts`,
+`UserStore`) ont été vérifiées contre la source du dépôt Vencord, pas de mémoire. La
+CI compile `index.tsx` avec esbuild à chaque changement.
 
 ## Structure
 

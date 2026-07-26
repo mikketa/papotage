@@ -8,6 +8,7 @@ import {
     EMOJI, PADDING,
     countCompactSymbols, countHiddenSymbols,
     decodeCompact, decodeEmoji, decodeHidden,
+    visibleText,
     encodeCompact, encodeEmoji, encodeHidden,
     parseInput
 } from "./codec.mjs";
@@ -198,5 +199,53 @@ export class SeenCache {
 
     get size() {
         return this.map.size;
+    }
+}
+
+// ===========================================================================
+// Vérification de bout en bout
+// ===========================================================================
+// Le codec suppose que Discord conserve intégralement les caractères invisibles
+// d'un message, y compris insérés au milieu d'un texte. Cette hypothèse ne se
+// vérifie pas en local : seul un aller-retour par les serveurs de Discord peut
+// trancher.
+//
+// Plutôt que de la documenter comme une inconnue, on la mesure. Chaque message
+// chiffré envoyé est retenu ; quand Discord nous le renvoie (MESSAGE_CREATE), on
+// compare. S'il diffère, le destinataire ne pourra pas le lire, et l'expéditeur
+// doit le savoir tout de suite.
+export class SendLedger {
+    constructor(max = 32) {
+        this.max = max;
+        this.pending = [];
+    }
+
+    remember(content) {
+        if (this.pending.length >= this.max) this.pending.shift();
+        this.pending.push({ content, key: visibleText(content), settled: false });
+    }
+
+    // "ok"      : Discord a rendu le message à l'identique ;
+    // "altered" : un de nos envois est revenu différent ;
+    // null      : rien à signaler.
+    //
+    // `isOwn` est indispensable et ne peut pas être deviné ici : un message
+    // dépouillé de tous ses caractères invisibles par Discord est indiscernable
+    // d'un message où quelqu'un d'autre a tapé la même phrase que notre
+    // couverture. Sans l'identité de l'auteur, on alerterait à tort.
+    check(received, { isOwn = false } = {}) {
+        const exact = this.pending.find(e => e.content === received);
+        if (exact) { exact.settled = true; return "ok"; }
+        if (!isOwn) return null;
+        // Même couverture, contenu différent : Discord a touché au message.
+        // On ne prévient qu'une fois par envoi.
+        const near = this.pending.find(e => !e.settled && e.key === visibleText(received));
+        if (!near) return null;
+        near.settled = true;
+        return "altered";
+    }
+
+    get size() {
+        return this.pending.length;
     }
 }

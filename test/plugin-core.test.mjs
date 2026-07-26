@@ -10,6 +10,7 @@ import {
     MODE,
     PapotageError,
     SeenCache,
+    SendLedger,
     decodeIncoming,
     detectMode,
     encodeOutgoing,
@@ -17,6 +18,7 @@ import {
     resolveSeparator,
     stripLockPrefix
 } from "../src/plugin-core.mjs";
+import { visibleText } from "../src/codec.mjs";
 import { CTX, OTHER_CTX, PASS, incompressible, visible } from "./helpers.mjs";
 
 const base = { passphrase: PASS, context: CTX };
@@ -202,4 +204,56 @@ test("SeenCache évince les plus anciens sans tout vider", () => {
     assert.equal(c.size, 7);            // 10 - 4 évincés + 1 nouveau
     assert.equal(c.has("0", "x"), false); // le plus ancien est parti
     assert.equal(c.has("9", "x"), true);  // le plus récent est resté
+});
+
+// --- Vérification de l'aller-retour Discord ---------------------------------
+// Le codec suppose que Discord préserve les caractères invisibles. Cette
+// hypothèse ne se vérifie qu'en passant par ses serveurs : le registre la
+// transforme en mesure, sur chaque message envoyé.
+
+test("un message rendu à l'identique par Discord est confirmé", async () => {
+    const ledger = new SendLedger();
+    const content = await encodeOutgoing({ ...base, raw: "secret", defaultCover: "ok ça marche" });
+    ledger.remember(content);
+    assert.equal(ledger.check(content), "ok");
+});
+
+test("un message dont Discord a retiré des caractères invisibles est signalé", async () => {
+    // Le cas qu'on ne peut pas tester en local : Discord nettoie le message et
+    // le destinataire ne peut plus le lire. L'expéditeur doit l'apprendre.
+    const ledger = new SendLedger();
+    const content = await encodeOutgoing({ ...base, raw: "secret", defaultCover: "ok ça marche" });
+    ledger.remember(content);
+    // Un nettoyage réaliste ne touche qu'aux invisibles, pas au texte affiché.
+    const ampute = [...content].filter(c => visibleText(c) !== "").join("");
+    assert.notEqual(ampute, content);
+    assert.equal(ledger.check(ampute, { isOwn: true }), "altered");
+});
+
+test("le message de quelqu'un d'autre reprenant notre couverture n'alerte pas", async () => {
+    // Un message dépouillé de tous ses invisibles est indiscernable d'un
+    // message où quelqu'un a simplement tapé la même phrase : sans l'identité
+    // de l'auteur, on alerterait à tort. D'où le drapeau isOwn.
+    const ledger = new SendLedger();
+    ledger.remember(await encodeOutgoing({ ...base, raw: "secret", defaultCover: "ok ça marche" }));
+    for (const autre of ["salut ça va ?", "ok ça marche", ""]) {
+        assert.equal(ledger.check(autre), null, `alerte à tort sur ${JSON.stringify(autre)}`);
+    }
+});
+
+test("on ne prévient qu'une fois par envoi", async () => {
+    // Discord peut redispatcher le même message : une seule alerte, sinon
+    // l'utilisateur se prend une rafale de toasts.
+    const ledger = new SendLedger();
+    const content = await encodeOutgoing({ ...base, raw: "secret", defaultCover: "ok ça marche" });
+    ledger.remember(content);
+    const ampute = [...content].filter(c => visibleText(c) !== "").join("");
+    assert.equal(ledger.check(ampute, { isOwn: true }), "altered");
+    assert.equal(ledger.check(ampute, { isOwn: true }), null);
+});
+
+test("le registre reste borné", async () => {
+    const ledger = new SendLedger(4);
+    for (let i = 0; i < 20; i++) ledger.remember(`msg${i}`);
+    assert.equal(ledger.size, 4);
 });

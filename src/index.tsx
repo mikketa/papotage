@@ -17,7 +17,7 @@ import {
 import { updateMessage } from "@api/MessageUpdater";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
-import { FluxDispatcher, MessageStore, SelectedChannelStore, Toasts, useState } from "@webpack/common";
+import { FluxDispatcher, MessageStore, SelectedChannelStore, Toasts, UserStore, useState } from "@webpack/common";
 
 import { forgetKeys, warmKey } from "./codec.mjs";
 import { parseCoverPool } from "./covers.mjs";
@@ -30,6 +30,7 @@ import {
     PADDING,
     PapotageError,
     SeenCache,
+    SendLedger,
     stripLockPrefix
 } from "./plugin-core.mjs";
 
@@ -70,7 +71,8 @@ const settings = definePluginSettings({
     },
     coverPool: {
         type: OptionType.STRING,
-        description: "Tes propres phrases de couverture, séparées par ';' "
+        multiline: true,
+        description: "Tes propres phrases de couverture, une par ligne "
             + "(le pool intégré est public, donc connu de qui lit le code)",
         default: ""
     },
@@ -109,9 +111,14 @@ function encodeSettings() {
 }
 
 // --- Icône cadenas ----------------------------------------------------------
-function LockIcon({ on }: { on: boolean; }) {
+// Vencord exige un IconComponent en 3e argument de addChatBarButton : il sert à
+// représenter le bouton dans l'écran de réglages, où il est dimensionné par
+// l'appelant. D'où les props height/width/className, à ne pas ignorer.
+function LockIcon({ on, height = 24, width = 24, className }: {
+    on: boolean; height?: number | string; width?: number | string; className?: string;
+}) {
     return (
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+        <svg width={width} height={height} className={className} viewBox="0 0 24 24" fill="none">
             <rect x="5" y="11" width="14" height="9" rx="2"
                 fill={on ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" />
             <path d={on ? "M8 11V8a4 4 0 0 1 8 0v3" : "M8 11V8a4 4 0 0 1 8 0"}
@@ -166,6 +173,11 @@ let lastPass = "";                   // si le mot de passe change, on réessaie 
 // contient le secret en clair. Ce ne sont que des identifiants.
 const decrypted = new Set<string>();
 
+// Messages chiffrés qu'on vient d'envoyer, en attente de retour par Discord.
+// C'est la seule façon de savoir si Discord préserve vraiment nos caractères
+// invisibles : on le mesure au lieu de le supposer.
+const ledger = new SendLedger();
+
 function passphraseChanged(pass: string) {
     if (pass === lastPass) return;
     lastPass = pass;
@@ -217,7 +229,21 @@ function scanCurrent() {
     try { scanChannel(SelectedChannelStore.getChannelId()); } catch { /* ignore */ }
 }
 
-const onCreate = (e: any) => { const m = e?.message; if (m?.content) decryptLater(m.channel_id, m.id, m.content); };
+const onCreate = (e: any) => {
+    const m = e?.message;
+    if (!m?.content) return;
+    // Discord nous renvoie nos propres messages : c'est le moment de vérifier
+    // qu'il ne les a pas modifiés en route. L'identité de l'auteur est
+    // indispensable — voir SendLedger.check.
+    let isOwn = false;
+    try { isOwn = !!m.author?.id && m.author.id === UserStore.getCurrentUser()?.id; } catch { /* ignore */ }
+    if (ledger.check(m.content, { isOwn }) === "altered") {
+        toast(Toasts.Type.FAILURE,
+            "Papotage : Discord a modifié ton message en le publiant. "
+            + "Le destinataire ne pourra pas le lire — essaie le mode « Invisible sûr ».");
+    }
+    decryptLater(m.channel_id, m.id, m.content);
+};
 const onUpdate = (e: any) => { const m = e?.message; if (m?.content) decryptLater(m.channel_id, m.id, m.content); };
 const onSelect = (e: any) => {
     // Pré-dérive la clé du salon ouvert : PBKDF2 600k coûte ~300 ms, autant les
@@ -260,6 +286,7 @@ export default definePlugin({
 
             try {
                 msg.content = await encodeOutgoing({ ...encodeSettings(), raw: msg.content, context: channelId });
+                ledger.remember(msg.content);
             } catch (e) {
                 const m = e instanceof PapotageError ? e.message
                     : `Papotage : échec inattendu (${(e as any)?.message ?? e}). Message NON envoyé.`;
@@ -285,7 +312,7 @@ export default definePlugin({
             }
         });
 
-        addChatBarButton("papotage", PapotageButton);
+        addChatBarButton("papotage", PapotageButton, props => <LockIcon on={false} {...props} />);
 
         FluxDispatcher.subscribe("MESSAGE_CREATE", onCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onUpdate);

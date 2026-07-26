@@ -295,6 +295,18 @@ function firstCompactSlot(cover) {
     return idx;
 }
 
+// Ce qu'un humain voit : le message débarrassé des symboles de nos alphabets.
+// Sert à reconnaître nos propres messages quand Discord nous les renvoie.
+export function visibleText(message) {
+    let out = "";
+    for (const ch of message) {
+        if (ZW_VAL.has(ch)) continue;
+        if (vsToByte(ch.codePointAt(0)) !== null) continue;
+        out += ch;
+    }
+    return out;
+}
+
 // Nombre de symboles de chaque alphabet présents dans un message. Sert au
 // pré-filtre du plugin : sans marqueur fixe, c'est la quantité qui trahit un
 // payload, plus sa position.
