@@ -25,6 +25,16 @@ export const MODE = {
     EMOJI: "emoji"        // emojis visibles : lisiblement bizarre, messages courts
 };
 
+// Un mode = un encodeur et un décodeur, déclarés côte à côte. `detectMode` ne
+// distingue pas les deux densités zero-width (elle se déduit des symboles), donc
+// HIDDEN décode aussi HIDDEN_SAFE.
+const CODECS = {
+    [MODE.HIDDEN]: [(txt, pass, o) => encodeHidden(txt, pass, { ...o, bits: 3 }), decodeHidden],
+    [MODE.HIDDEN_SAFE]: [(txt, pass, o) => encodeHidden(txt, pass, { ...o, bits: 2 }), decodeHidden],
+    [MODE.COMPACT]: [encodeCompact, decodeCompact],
+    [MODE.EMOJI]: [encodeEmoji, decodeEmoji]
+};
+
 export const DEFAULT_SEPARATOR = " | ";
 export const LOCK_PREFIX = "🔓 ";
 export const MAX_MESSAGE_CHARS = 2000; // limite Discord
@@ -51,16 +61,14 @@ export class PapotageError extends Error {
 //
 // C'est de l'interprétation de saisie utilisateur, pas de l'encodage — d'où sa
 // place ici et non dans le codec.
-function parseInput(raw, separator = DEFAULT_SEPARATOR) {
-    const at = separator ? raw.indexOf(separator) : -1;
-    if (at < 0) return { cover: null, secret: raw };
-    const cover = raw.slice(0, at).trim();
-    const secret = raw.slice(at + separator.length);
+function parseInput(raw, separator) {
+    const at = raw.indexOf(separator);
+    const cover = at < 0 ? "" : raw.slice(0, at).trim();
+    const secret = at < 0 ? raw : raw.slice(at + separator.length);
     // Un des deux côtés vide (espaces compris) => la saisie n'est pas un vrai
     // couple couverture/secret : on chiffre tout, plutôt que de publier la
     // moitié gauche en clair en croyant que c'est une couverture voulue.
-    if (!cover || !secret.trim()) return { cover: null, secret: raw };
-    return { cover, secret };
+    return cover && secret.trim() ? { cover, secret } : { cover: null, secret: raw };
 }
 
 // ===========================================================================
@@ -89,28 +97,13 @@ export async function encodeOutgoing({
     }
 
     const { cover, secret } = parseInput(raw, resolveSeparator(separator));
-    if (!secret.trim()) {
-        throw new PapotageError("empty-secret",
-            "Papotage : rien à chiffrer après le séparateur. Message NON envoyé.");
-    }
-    // Le choix de la phrase affichée se fait ICI : c'est une décision de
-    // produit. Le codec la reçoit toute faite et n'a pas à connaître le pool.
-    const opts = { cover: pickCover(cover ?? defaultCover, { pool }), context, padding };
+    // Le choix de la phrase affichée se fait ICI : c'est une décision de produit.
+    // Le codec la reçoit toute faite et n'a pas à connaître le pool.
+    const encode = (CODECS[mode] ?? CODECS[MODE.HIDDEN])[0];
     let content;
     try {
-        switch (mode) {
-            case MODE.EMOJI:
-                content = await encodeEmoji(secret, passphrase, opts);
-                break;
-            case MODE.COMPACT:
-                content = await encodeCompact(secret, passphrase, opts);
-                break;
-            case MODE.HIDDEN_SAFE:
-                content = await encodeHidden(secret, passphrase, { ...opts, bits: 2 });
-                break;
-            default:
-                content = await encodeHidden(secret, passphrase, { ...opts, bits: 3 });
-        }
+        content = await encode(secret, passphrase,
+            { cover: pickCover(cover ?? defaultCover, { pool }), context, padding });
     } catch (e) {
         // Une couverture trop courte n'est pas une panne de chiffrement : c'est
         // un réglage à corriger, et le message doit le dire.
@@ -124,9 +117,8 @@ export async function encodeOutgoing({
     // Discord rejette silencieusement au-delà de 2000 : mieux vaut annuler avec
     // une explication que laisser le message disparaître sans rien dire.
     if (content.length > maxChars) {
-        const over = content.length - maxChars;
         throw new PapotageError("too-long",
-            `Papotage : message trop long de ${over} caractères une fois chiffré `
+            `Papotage : message trop long de ${content.length - maxChars} caractères une fois chiffré `
             + `(${content.length} / ${maxChars}). Coupe-le en deux`
             + (mode === MODE.HIDDEN ? " ou passe en mode compact." : "."));
     }
@@ -137,28 +129,23 @@ export async function encodeOutgoing({
 // Réception
 // ===========================================================================
 // Pré-filtre : quel décodeur tenter, ou null si le message n'a clairement rien
-// à voir avec Papotage. Évite de lancer un déchiffrement sur chaque message du
-// salon (le scan d'un historique en traite des centaines).
-
-// Depuis que le payload est dispersé dans la couverture, il n'y a plus ni
-// marqueur de début ni traînée d'un seul tenant à chercher : on compte les
-// symboles présents dans tout le message.
+// à voir avec Papotage. Le payload étant dispersé dans la couverture, il n'y a
+// ni marqueur de début ni traînée à chercher : on compte les symboles présents.
 //
 // Ces seuils comptent deux fois :
-//   - à la réception, ils évitent de lancer un déchiffrement sur chaque message ;
+//   - à la réception, ils évitent de lancer un déchiffrement sur chaque message
+//     du salon (le scan d'un historique en traite des centaines) ;
 //   - à l'envoi, `isPapotageMessage` sert à ne pas re-chiffrer un message déjà
 //     chiffré. Un faux positif là-dessus enverrait le message EN CLAIR.
 // La plus petite trame possible fait 44 octets, soit 119 symboles invisibles en
-// densité 3 bits, 45 en mode compact, 90 emojis en mode emoji. Les seuils
-// gardent une marge sous ces minimums, tout en restant très au-dessus de ce
-// qu'un humain peut taper ou coller par accident.
+// densité 3 bits, 45 en mode compact, 90 emojis en mode emoji. Les seuils gardent
+// une marge sous ces minimums, tout en restant très au-dessus de ce qu'un humain
+// peut taper ou coller par accident. Le mode emoji, lui, produit une série
+// contiguë : c'est un run qu'on cherche, pour ne pas réagir à un simple 👍.
 const MIN_HIDDEN = 64;
 const MIN_COMPACT = 40;
-
-// Le mode emoji, lui, produit bien une série contiguë : c'est un run qu'on
-// cherche, et il évite de réagir à un simple 👍 dans une phrase.
 const MIN_EMOJI_RUN = 32;
-const STOP = { hidden: MIN_HIDDEN, compact: MIN_COMPACT, emoji: MIN_EMOJI_RUN };
+const STOP = Object.freeze({ hidden: MIN_HIDDEN, compact: MIN_COMPACT, emoji: MIN_EMOJI_RUN });
 
 export function detectMode(content) {
     if (!content) return null;
@@ -182,11 +169,7 @@ export async function decodeIncoming({ content, passphrase, context = "" }) {
     const mode = detectMode(content);
     if (!mode) return null;
     try {
-        switch (mode) {
-            case MODE.COMPACT: return await decodeCompact(content, passphrase, { context });
-            case MODE.EMOJI: return await decodeEmoji(content, passphrase, { context });
-            default: return await decodeHidden(content, passphrase, { context });
-        }
+        return await CODECS[mode][1](content, passphrase, { context });
     } catch {
         return null;
     }
@@ -242,12 +225,10 @@ export class SeenCache {
 // Le codec suppose que Discord conserve intégralement les caractères invisibles
 // d'un message, y compris insérés au milieu d'un texte. Cette hypothèse ne se
 // vérifie pas en local : seul un aller-retour par les serveurs de Discord peut
-// trancher.
-//
-// Plutôt que de la documenter comme une inconnue, on la mesure. Chaque message
-// chiffré envoyé est retenu ; quand Discord nous le renvoie (MESSAGE_CREATE), on
-// compare. S'il diffère, le destinataire ne pourra pas le lire, et l'expéditeur
-// doit le savoir tout de suite.
+// trancher. Plutôt que de la documenter comme une inconnue, on la mesure. Chaque
+// message chiffré envoyé est retenu ; quand Discord nous le renvoie
+// (MESSAGE_CREATE), on compare. S'il diffère, le destinataire ne pourra pas le
+// lire, et l'expéditeur doit le savoir tout de suite.
 export class SendLedger {
     constructor(max = 32) {
         this.max = max;
@@ -264,17 +245,17 @@ export class SendLedger {
     // null      : rien à signaler.
     //
     // `isOwn` est indispensable et ne peut pas être deviné ici : un message
-    // dépouillé de tous ses caractères invisibles par Discord est indiscernable
-    // d'un message où quelqu'un d'autre a tapé la même phrase que notre
-    // couverture. Sans l'identité de l'auteur, on alerterait à tort.
+    // dépouillé de tous ses caractères invisibles est indiscernable d'un message
+    // où quelqu'un d'autre a tapé la même phrase que notre couverture. Sans
+    // l'identité de l'auteur, on alerterait à tort.
     check(received, { isOwn = false } = {}) {
         const exact = this.pending.find(e => e.content === received);
         if (exact) { exact.settled = true; return "ok"; }
         if (!isOwn) return null;
         // Même couverture, contenu différent : Discord a touché au message.
         // On ne prévient qu'une fois par envoi.
-        const cle = visibleText(received); // invariant de boucle : une seule fois
-        const near = this.pending.find(e => !e.settled && e.key === cle);
+        const key = visibleText(received); // invariant de boucle : une seule fois
+        const near = this.pending.find(e => !e.settled && e.key === key);
         if (!near) return null;
         near.settled = true;
         return "altered";

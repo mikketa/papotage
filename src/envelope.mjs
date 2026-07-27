@@ -6,17 +6,12 @@
 // et il s'audite sans lire le reste du projet.
 //
 //   clair ──▶ [flags(1)] ──▶ deflate? ──▶ padding ──▶ AES-GCM ──▶ octets
-//                                                                   │
-//                          ┌────────────────────────────────────────┘
-//                          ▼
-//   octets = nonce(12 o) || ciphertext || tag(16 o)
+//   octets envoyés = nonce(12 o) || ciphertext || tag(16 o)
 //
-// Nonce de 12 octets aléatoires, tag GCM complet de 128 bits, sel PBKDF2 dérivé
-// du salon, drapeau de compression placé DANS le clair chiffré pour ne pas
-// fuiter la compressibilité, remplissage par blocs avec jitter aléatoire.
-// Le raisonnement derrière chaque choix est dans SECURITY.md.
+// Le raisonnement derrière chacune des valeurs ci-dessous est dans SECURITY.md,
+// section « Choix cryptographiques » : ne pas y toucher sans l'avoir lue.
 
-import { randomInts } from "./random.mjs";
+import { randomInt } from "./random.mjs";
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -33,6 +28,19 @@ const FLAG_ZIPPED = 0x01;
 const BUCKETS = [64, 128, 256, 512, 1024, 1536, 2048];
 export const PADDING = { BLOCK: "bloc", BUCKET: "palier" };
 
+// Blocs de remplissage supplémentaires tirés au hasard. Sans eux, un secret
+// donné produit toujours exactement la même taille de message : deux envois du
+// même texte se reconnaissent à la longueur. Le mode paliers, lui, brouille déjà
+// bien plus largement — y ajouter du bruit ne ferait que casser ses paliers.
+const JITTER_BLOCKS = 3;
+
+function concat(parts, total) {
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const p of parts) { out.set(p, at); at += p.length; }
+    return out;
+}
+
 // --- Compression (deflate-raw) ----------------------------------------------
 // Chaque octet économisé = 1 à 4 caractères invisibles en moins. Format "raw"
 // (sans en-tête zlib) pour ne rien gaspiller. Appliquée seulement si elle réduit
@@ -45,57 +53,47 @@ const HAS_COMPRESSION = typeof CompressionStream === "function"
 // perdu — le résultat serait de toute façon écarté.
 const MIN_DEFLATE = 32;
 
-async function pipeThrough(stream, bytes) {
-    const writer = stream.writable.getWriter();
+async function pipe(transform, bytes) {
+    const writer = transform.writable.getWriter();
     writer.write(bytes);
     writer.close();
-    const reader = stream.readable.getReader();
+    const reader = transform.readable.getReader();
     const chunks = [];
     let total = 0;
     for (;;) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) return concat(chunks, total);
         chunks.push(value);
         total += value.length;
     }
-    const out = new Uint8Array(total);
-    let off = 0;
-    for (const c of chunks) { out.set(c, off); off += c.length; }
-    return out;
 }
-const deflate = bytes => pipeThrough(new CompressionStream("deflate-raw"), bytes);
-const inflate = bytes => pipeThrough(new DecompressionStream("deflate-raw"), bytes);
+const deflate = bytes => pipe(new CompressionStream("deflate-raw"), bytes);
+const inflate = bytes => pipe(new DecompressionStream("deflate-raw"), bytes);
 
-// --- Padding ISO/IEC 7816-4 -------------------------------------------------
-// Un octet 0x80 puis des 0x00 jusqu'à la cible. Toujours au moins un octet
-// ajouté, donc le dépaddage est non ambigu quelle que soit la cible.
+// --- Trame à chiffrer -------------------------------------------------------
+// [flags(1)] || corps || padding ISO/IEC 7816-4 (un octet 0x80 puis des 0x00).
+// Toujours au moins un octet ajouté, donc le dépaddage est non ambigu quelle que
+// soit la cible. Construite d'un seul jet : une seule allocation, une seule
+// copie du corps.
 function targetLength(n, mode) {
-    if (mode === PADDING.BUCKET) {
-        for (const b of BUCKETS) if (n < b) return b;
-        return Math.ceil((n + 1) / 512) * 512;
-    }
-    return (Math.floor(n / PAD_BLOCK) + 1) * PAD_BLOCK;
+    if (mode !== PADDING.BUCKET) return (Math.floor(n / PAD_BLOCK) + 1) * PAD_BLOCK;
+    return BUCKETS.find(b => n < b) ?? Math.ceil((n + 1) / 512) * 512;
 }
 
-// Blocs de remplissage supplémentaires tirés au hasard. Sans eux, un secret
-// donné produit toujours exactement la même taille de message : deux envois du
-// même texte se reconnaissent à la longueur, et la longueur envoyée détermine
-// celle du clair à 16 octets près. Le mode paliers, lui, brouille déjà bien
-// plus largement — y ajouter du bruit ne ferait que casser ses paliers.
-const JITTER_BLOCKS = 3;
-
-function pad(bytes, mode) {
-    const jitter = mode === PADDING.BUCKET ? 0 : randomInts(1, JITTER_BLOCKS)[0] * PAD_BLOCK;
-    const out = new Uint8Array(targetLength(bytes.length, mode) + jitter);
-    out.set(bytes, 0);
-    out[bytes.length] = 0x80;
+function frame(flags, body, mode) {
+    const used = 1 + body.length;
+    const jitter = mode === PADDING.BUCKET ? 0 : randomInt(JITTER_BLOCKS) * PAD_BLOCK;
+    const out = new Uint8Array(targetLength(used, mode) + jitter);
+    out[0] = flags; // en-tête DANS le clair chiffré : aucun oracle en clair
+    out.set(body, 1);
+    out[used] = 0x80;
     return out;
 }
 
-function unpad(bytes) {
-    for (let i = bytes.length - 1; i >= 0; i--) {
-        if (bytes[i] === 0x00) continue;
-        if (bytes[i] === 0x80) return bytes.subarray(0, i);
+function unframe(padded) {
+    for (let i = padded.length - 1; i >= 0; i--) {
+        if (padded[i] === 0x00) continue;
+        if (padded[i] === 0x80 && i >= 1) return padded.subarray(0, i);
         break;
     }
     throw new Error("padding invalide"); // fail-closed : l'appelant renverra null
@@ -107,41 +105,38 @@ function unpad(bytes) {
 //     de précalculation unique qui casserait tout le monde d'un coup ;
 //   - un même mot de passe donne une clé différente par conversation, donc la
 //     compromission d'un salon ne déchiffre pas les autres.
-// PBKDF2 600k coûte ~300 ms : on met la clé en cache (sel déterministe pour un
-// contexte donné), sinon déchiffrer un salon dériverait la clé à chaque message.
-// Borné : une dérivation coûte ~104 ms de CPU (mesuré) et retient une clé en
-// mémoire. Sans limite, parcourir cent salons en dérivait cent et les gardait
-// toutes jusqu'au rechargement de Discord.
+//
+// Une dérivation coûte ~104 ms de CPU (mesuré) : sans cache, déchiffrer un salon
+// la refait à chaque message. Le cache est borné et évince le moins récemment
+// utilisé — sans borne, parcourir cent salons retenait cent clés en mémoire
+// jusqu'au rechargement de Discord.
 const KEY_CACHE_MAX = 16;
 const keyCache = new Map(); // `${context}\0${passphrase}` -> Promise<CryptoKey>
 
-async function saltFor(context) {
-    return new Uint8Array(await crypto.subtle.digest("SHA-256", ENC.encode(`${DOMAIN}|${context}`)));
-}
-
 function deriveKey(passphrase, context = "") {
-    const cacheKey = `${context}\u0000${passphrase}`;
-    const cached = keyCache.get(cacheKey);
+    const id = `${context}\u0000${passphrase}`; // séparateur impossible dans un mot de passe
+    const cached = keyCache.get(id);
     if (cached) {
-        keyCache.delete(cacheKey); // réinsertion = remise en tête (Map = ordre d'insertion)
-        keyCache.set(cacheKey, cached);
+        keyCache.delete(id); // réinsertion = remise en tête (Map = ordre d'insertion)
+        keyCache.set(id, cached);
         return cached;
     }
     const key = (async () => {
+        const salt = await crypto.subtle.digest("SHA-256", ENC.encode(`${DOMAIN}|${context}`));
         const base = await crypto.subtle.importKey(
             "raw", ENC.encode(passphrase), "PBKDF2", false, ["deriveKey"]
         );
         return crypto.subtle.deriveKey(
-            { name: "PBKDF2", salt: await saltFor(context), iterations: ITER, hash: "SHA-256" },
+            { name: "PBKDF2", salt: new Uint8Array(salt), iterations: ITER, hash: "SHA-256" },
             base,
             { name: "AES-GCM", length: 256 },
             false,
             ["encrypt", "decrypt"]
         );
     })();
-    key.catch(() => keyCache.delete(cacheKey)); // ne pas garder un échec en cache
+    key.catch(() => keyCache.delete(id)); // ne pas garder un échec en cache
     if (keyCache.size >= KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
-    keyCache.set(cacheKey, key);
+    keyCache.set(id, key);
     return key;
 }
 
@@ -155,8 +150,8 @@ export function forgetKeys() {
     keyCache.clear();
 }
 
-// --- Chiffrement : texte -> octets (nonce || ciphertext+tag) ----------------
-// Scelle un texte : renvoie nonce || ciphertext || tag.
+// --- Sceller / ouvrir -------------------------------------------------------
+// Renvoie nonce || ciphertext || tag.
 export async function seal(text, passphrase, context = "", padding = PADDING.BLOCK) {
     const key = await deriveKey(passphrase, context);
     const raw = ENC.encode(text);
@@ -167,19 +162,11 @@ export async function seal(text, passphrase, context = "", padding = PADDING.BLO
         if (packed.length < raw.length) { body = packed; flags |= FLAG_ZIPPED; }
     }
 
-    const inner = new Uint8Array(1 + body.length);
-    inner[0] = flags;                 // en-tête chiffré : aucun oracle en clair
-    inner.set(body, 1);
-
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv: nonce, tagLength: TAG_BITS }, key, pad(inner, padding)
-    ));
-
-    const out = new Uint8Array(nonce.length + ct.length);
-    out.set(nonce, 0);
-    out.set(ct, nonce.length);
-    return out;
+    const ct = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: nonce, tagLength: TAG_BITS }, key, frame(flags, body, padding)
+    );
+    return concat([nonce, new Uint8Array(ct)], NONCE_LEN + ct.byteLength);
 }
 
 // Lève si le tag est invalide (mauvaise clé, mauvais contexte, message étranger).
@@ -191,15 +178,12 @@ export async function unseal(bytes, passphrase, context = "") {
         key,
         bytes.subarray(NONCE_LEN)
     ));
-    const inner = unpad(padded);
-    if (inner.length < 1) throw new Error("trame vide");
+    const inner = unframe(padded);
     const body = inner.subarray(1);
-    if ((inner[0] & FLAG_ZIPPED) === 0) return DEC.decode(body);
-    return DEC.decode(await inflate(body));
+    return (inner[0] & FLAG_ZIPPED) === 0 ? DEC.decode(body) : DEC.decode(await inflate(body));
 }
 
-// Taille de l'en-tête d'une trame scellée : le codec en a besoin pour calculer
-// un décalage, sans rien savoir de ce qu'il y a dedans.
+// --- Ce que le codec doit savoir d'une trame, sans en connaître le contenu ---
 export const FRAME_HEAD = NONCE_LEN + TAG_BITS / 8;
 
 // La trame fait nonce(12) + ciphertext + tag(16), et GCM ne change pas la

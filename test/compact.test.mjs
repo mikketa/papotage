@@ -15,7 +15,8 @@ test("le texte visible est exactement la couverture", async () => {
 
 test("une couverture avec emoji porteur d'un sélecteur légitime décode quand même", async () => {
     // ❤️ = U+2764 U+FE0F : le U+FE0F est un sélecteur de variation valide qui
-    // s'ajoute au flux d'octets. Le décodeur doit se recaler sur le MAGIC.
+    // s'ajoute au flux d'octets. Le décodeur doit absorber ce décalage — qu'il
+    // calcule, la trame n'ayant plus d'octet de repère depuis la v4.
     const msg = await encodeCompact("rdv ce soir", PASS, { cover: "trop hâte ❤️ à toute", context: CTX });
     assert.equal(await decodeCompact(msg, PASS, { context: CTX }), "rdv ce soir");
 });

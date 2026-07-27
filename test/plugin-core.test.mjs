@@ -263,31 +263,68 @@ test("le registre reste borné", async () => {
 
 // --- Pré-filtre : le rejet rapide ne doit jamais diverger --------------------
 
+// Entrées choisies pour tomber des deux côtés de chaque raccourci : sans aucun
+// caractère candidat, avec un candidat isolé, et avec un vrai payload.
+const echantillonsMixtes = async () => [
+    "message ordinaire en ascii",
+    "français accentué : où ça, à côté ?",
+    "avec un emoji 👍 dedans",
+    "avec un cœur ❤️ et son sélecteur",
+    "​‌‍ invisible",
+    "⁠".repeat(100),
+    "🏳️‍🌈👨‍👩‍👧",
+    "",
+    "\ud800",                       // demi-codet haut orphelin en fin de message
+    // Deux demi-codets hauts : ce n'est pas une paire, mais l'arithmétique des
+    // paires appliquée quand même donnerait ici U+FE00, soit un faux sélecteur
+    // de variation. D'où la validation du SECOND demi-codet.
+    "\ud800\uda00 texte",
+    // Régression : un demi-codet haut orphelin SUIVI de symboles. Le scanner
+    // avançait de deux unités sans vérifier que la seconde était bien un
+    // demi-codet bas, donc avalait le symbole suivant et en comptait un de
+    // moins — de quoi faire passer un message juste sous le seuil de détection.
+    "\uda00" + "​".repeat(8),
+    "\uda00️",
+    await encodeOutgoing({ ...base, raw: "un vrai message chiffré" }),
+    await encodeOutgoing({ ...base, raw: "compact", mode: MODE.COMPACT }),
+    await encodeOutgoing({ ...base, raw: "emoji", mode: MODE.EMOJI })
+];
+
 test("le rejet rapide donne exactement le même résultat que la boucle complète", async () => {
-    // scanSymbols court-circuite les messages sans caractère candidat. Si ce
-    // raccourci se désynchronisait de la boucle, des messages chiffrés
-    // deviendraient invisibles au plugin — ou l'inverse. On compare les deux
-    // chemins sur des entrées choisies pour tomber des deux côtés de la limite.
-    const echantillons = [
-        "message ordinaire en ascii",
-        "français accentué : où ça, à côté ?",
-        "avec un emoji 👍 dedans",
-        "avec un cœur ❤️ et son sélecteur",
-        "​‌‍ invisible",
-        "⁠".repeat(100),
-        "🏳️‍🌈👨‍👩‍👧",
-        "",
-        "\ud800",                       // demi-codet haut orphelin
-        await encodeOutgoing({ ...base, raw: "un vrai message chiffré" }),
-        await encodeOutgoing({ ...base, raw: "compact", mode: MODE.COMPACT }),
-        await encodeOutgoing({ ...base, raw: "emoji", mode: MODE.EMOJI })
-    ];
-    for (const s of echantillons) {
+    // scanSymbols court-circuite les messages sans caractère candidat, puis
+    // chaque caractère sous U+200B. Si l'un de ces raccourcis se désynchronisait
+    // de la boucle, des messages chiffrés deviendraient invisibles au plugin —
+    // ou l'inverse, et un message ordinaire partirait en clair.
+    for (const s of await echantillonsMixtes()) {
         const rapide = scanSymbols(s);
         const complet = scanReference(s);
         assert.deepEqual({ ...rapide }, complet, `divergence sur ${JSON.stringify(s.slice(0, 30))}`);
     }
 });
+
+test("visibleText donne exactement le même texte que le retrait naïf", async () => {
+    // Même risque que ci-dessus, sur l'autre fonction qui court-circuite les
+    // messages sans caractère candidat. Une divergence ici serait pire : le
+    // registre d'envoi comparerait des textes visibles faux, donc n'alerterait
+    // plus quand Discord altère un message — et la couverture partirait avec
+    // des symboles parasites qui corrompraient le payload.
+    for (const s of await echantillonsMixtes()) {
+        assert.equal(visibleText(s), visibleReference(s),
+            `divergence sur ${JSON.stringify(s.slice(0, 30))}`);
+    }
+});
+
+// Retrait naïf des deux alphabets invisibles, par points de code.
+function visibleReference(message) {
+    let out = "";
+    for (const ch of message) {
+        const cp = ch.codePointAt(0);
+        const invisible = (cp >= 0x200b && cp <= 0x200d) || (cp >= 0x2060 && cp <= 0x2064)
+            || (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef);
+        if (!invisible) out += ch;
+    }
+    return out;
+}
 
 // Implémentation de référence, volontairement naïve et lente.
 function scanReference(message) {
