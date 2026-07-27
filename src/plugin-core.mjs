@@ -10,12 +10,12 @@ import {
     scanSymbols,
     visibleText
 } from "./codec.mjs";
-import { parseCoverPool, pickCover } from "./covers.mjs";
+import { MIN_COVER_GRAPHEMES, parseCoverPool, pickCover } from "./covers.mjs";
 import { PADDING, forgetKeys, warmKey } from "./envelope.mjs";
 
 // Réexporté pour que le câblage Vencord n'ait qu'une seule couche en face de
 // lui : c'est la couche application qui expose ce dont l'interface a besoin.
-export { PADDING, forgetKeys, parseCoverPool, warmKey };
+export { MIN_COVER_GRAPHEMES, PADDING, forgetKeys, parseCoverPool, warmKey };
 
 export const MODE = {
     HIDDEN: "hidden",     // zero-width 3 bits/car (défaut)
@@ -51,7 +51,7 @@ export class PapotageError extends Error {
 //
 // C'est de l'interprétation de saisie utilisateur, pas de l'encodage — d'où sa
 // place ici et non dans le codec.
-export function parseInput(raw, separator = DEFAULT_SEPARATOR) {
+function parseInput(raw, separator = DEFAULT_SEPARATOR) {
     const at = separator ? raw.indexOf(separator) : -1;
     if (at < 0) return { cover: null, secret: raw };
     const cover = raw.slice(0, at).trim();
@@ -112,6 +112,11 @@ export async function encodeOutgoing({
                 content = await encodeHidden(secret, passphrase, { ...opts, bits: 3 });
         }
     } catch (e) {
+        // Une couverture trop courte n'est pas une panne de chiffrement : c'est
+        // un réglage à corriger, et le message doit le dire.
+        if (e instanceof RangeError || e instanceof TypeError) {
+            throw new PapotageError("cover-too-short", `${e.message} Message NON envoyé.`);
+        }
         throw new PapotageError("encode-failed",
             `Papotage : échec du chiffrement (${e?.message ?? e}). Message NON envoyé.`);
     }
@@ -268,7 +273,8 @@ export class SendLedger {
         if (!isOwn) return null;
         // Même couverture, contenu différent : Discord a touché au message.
         // On ne prévient qu'une fois par envoi.
-        const near = this.pending.find(e => !e.settled && e.key === visibleText(received));
+        const cle = visibleText(received); // invariant de boucle : une seule fois
+        const near = this.pending.find(e => !e.settled && e.key === cle);
         if (!near) return null;
         near.settled = true;
         return "altered";

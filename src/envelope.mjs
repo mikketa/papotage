@@ -3,7 +3,7 @@
 // Ce module ne sait rien d'Unicode, de caractères invisibles ni de Discord : il
 // transforme un texte en octets scellés, et l'inverse. Il est séparé du codec
 // pour cette raison précise — c'est le code dont une erreur est irrattrapable,
-// et il tient en 200 lignes qu'on peut auditer sans lire le reste du projet.
+// et il s'audite sans lire le reste du projet.
 //
 //   clair ──▶ [flags(1)] ──▶ deflate? ──▶ padding ──▶ AES-GCM ──▶ octets
 //                                                                   │
@@ -25,7 +25,7 @@ const DOMAIN = "papotage-v4";  // sépare les versions de protocole ET les conte
 const ITER = 600_000;          // PBKDF2 aligné OWASP ; coût amorti par le cache de clé
 const NONCE_LEN = 12;          // = taille d'IV native de GCM, aucun remplissage
 const TAG_BITS = 128;          // tag complet : pas de troncature, pas de limite d'invocations
-const PAD_BLOCK = 16;          // quantum de padding par défaut
+export const PAD_BLOCK = 16;   // quantum de padding par défaut
 const FLAG_ZIPPED = 0x01;
 
 // Paliers du mode « longueur masquée ». Coûteux en place, mais la taille du
@@ -201,21 +201,19 @@ export async function unseal(bytes, passphrase, context = "") {
 // Taille de l'en-tête d'une trame scellée : le codec en a besoin pour calculer
 // un décalage, sans rien savoir de ce qu'il y a dedans.
 export const FRAME_HEAD = NONCE_LEN + TAG_BITS / 8;
-export { PAD_BLOCK };
 
 // La trame fait nonce(12) + ciphertext + tag(16), et GCM ne change pas la
 // taille : le ciphertext vaut exactement le clair rembourré, donc un multiple de
 // PAD_BLOCK. Toute longueur qui ne respecte pas ça ne peut pas être une trame
 // Papotage — on l'écarte sans lancer le moindre déchiffrement.
 export function plausibleFrame(len) {
-    const head = NONCE_LEN + TAG_BITS / 8;
-    return len >= head + PAD_BLOCK && (len - head) % PAD_BLOCK === 0;
+    return len >= FRAME_HEAD + PAD_BLOCK && (len - FRAME_HEAD) % PAD_BLOCK === 0;
 }
 
 // Nombre MINIMAL d'octets envoyés pour un secret de `n` octets utiles. La taille
 // réelle y ajoute 0 à 2 blocs de remplissage tirés au hasard (mode blocs).
 export function wireSize(n, padding = PADDING.BLOCK) {
-    return NONCE_LEN + TAG_BITS / 8 + targetLength(n + 1, padding);
+    return FRAME_HEAD + targetLength(n + 1, padding);
 }
 
 // Nombre maximal, jitter compris.

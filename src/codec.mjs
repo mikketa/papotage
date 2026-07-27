@@ -24,6 +24,7 @@
 // vérifie sur 600 messages par mode qu'aucune régularité facile n'est revenue.
 
 import { FRAME_HEAD, PAD_BLOCK, plausibleFrame, seal, unseal } from "./envelope.mjs";
+import { graphemes } from "./graphemes.mjs";
 import { randomInts } from "./random.mjs";
 
 // ===========================================================================
@@ -36,15 +37,6 @@ import { randomInts } from "./random.mjs";
 // Le découpage se fait par GRAPHÈMES et non par points de code : insérer un
 // caractère au milieu de « ❤️ » (U+2764 U+FE0F) ou d'un emoji composé casserait
 // son rendu et rendrait la couverture visiblement bizarre — l'inverse du but.
-const SEGMENTER = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter() : null;
-
-function graphemes(s) {
-    if (!SEGMENTER) return [...s]; // repli : points de code
-    const out = [];
-    for (const { segment } of SEGMENTER.segment(s)) out.push(segment);
-    return out;
-}
-
 // Répartit `symbols` (tableau de chaînes) dans les intervalles entre graphèmes.
 // Les tailles de paquets sont tirées au hasard : deux messages de même longueur
 // ne produisent pas la même découpe.
@@ -56,8 +48,7 @@ function graphemes(s) {
 //
 // `fromGrapheme` protège une portion de tête : le mode compact y laisse les
 // sélecteurs de variation que porte déjà la couverture.
-function scatter(cover, symbols, { fromGrapheme = 0 } = {}) {
-    const all = graphemes(cover);
+function scatter(all, symbols, fromGrapheme = 0) {
     const head = all.slice(0, fromGrapheme).join(""); // zone laissée intacte
     const gs = all.slice(fromGrapheme);
 
@@ -65,12 +56,11 @@ function scatter(cover, symbols, { fromGrapheme = 0 } = {}) {
     // vide. Sinon on ne dispose que des intervalles entre graphèmes.
     const leading = head.length > 0;
     const slots = gs.length - (leading ? 0 : 1);
-    if (slots < 1) {
-        // Couverture d'un seul graphème : aucune position intérieure n'existe.
-        // On refuse de perdre des symboles ; l'appelant garantit une couverture
-        // assez longue pour que ce cas ne se produise pas en pratique.
-        return head + gs.join("") + symbols.join("");
-    }
+    // Aucune position intérieure : la seule issue serait d'accoler le payload à
+    // un bord, c'est-à-dire de produire exactement les deux signatures que ce
+    // module dit avoir supprimées. On refuse plutôt que de dégrader en silence ;
+    // l'appelant a vérifié la couverture avant d'arriver ici.
+    if (slots < 1) throw new RangeError("couverture trop courte pour disperser le payload");
 
     // Composition aléatoire uniforme de symbols.length en `slots` parts.
     const cuts = randomInts(slots - 1, symbols.length + 1);
@@ -90,13 +80,24 @@ function scatter(cover, symbols, { fromGrapheme = 0 } = {}) {
 }
 
 // La couverture est fournie par l'appelant : choisir ce qu'elle dit est une
-// décision de produit, pas d'encodage. Le codec exige seulement qu'elle existe
-// et qu'elle ait de quoi accueillir des symboles entre deux caractères.
-function requireCover(cover) {
+// décision de produit, pas d'encodage. Mais le codec doit vérifier ce dont IL a
+// besoin, et ce n'est pas une longueur de chaîne : c'est un nombre de positions
+// intérieures où poser des symboles. « ok » fait deux caractères et n'en offre
+// qu'une seule ; le payload y forme alors un bloc unique.
+//
+// Renvoie les graphèmes, pour que l'appelant ne les redécoupe pas.
+function coverSlots(cover, fromGrapheme = 0) {
     if (typeof cover !== "string" || cover.length === 0) {
         throw new TypeError("Papotage : une phrase de couverture est requise pour encoder.");
     }
-    return cover;
+    const gs = graphemes(cover);
+    const utiles = gs.length - fromGrapheme - (fromGrapheme > 0 ? 0 : 1);
+    if (utiles < 1) {
+        throw new RangeError(
+            `Papotage : couverture trop courte pour dissimuler un message (« ${cover} »). `
+            + "Il faut au moins deux caractères visibles pour répartir la partie invisible.");
+    }
+    return gs;
 }
 
 // ===========================================================================
@@ -110,15 +111,33 @@ function requireCover(cover) {
 // Aucun en-tête n'annonce la densité : ce serait une constante en tête de
 // payload. Elle se déduit — un symbole >= 4 ne peut venir que de l'alphabet
 // 3 bits — donc le récepteur s'adapte seul, sans rien qui le trahisse.
-const ZW_ALL = ["​", "‌", "‍", "⁠", "⁡", "⁢", "⁣", "⁤"];
+// Deux plages contiguës du plan de base, déclarées UNE fois. `ZW_ALL` en
+// découle, et les boucles rapides de `scanSymbols` et `decodeHidden` s'en
+// servent aussi : sans ça, l'ordre des symboles était réécrit à la main en
+// arithmétique à trois endroits, et réordonner le tableau cassait le décodage
+// en silence.
+const ZW_LOW = 0x200b, ZW_LOW_N = 3;   // U+200B..U+200D
+const ZW_HIGH = 0x2060, ZW_HIGH_N = 5; // U+2060..U+2064
+const ZW_ALL = [
+    ...Array.from({ length: ZW_LOW_N }, (_, i) => String.fromCharCode(ZW_LOW + i)),
+    ...Array.from({ length: ZW_HIGH_N }, (_, i) => String.fromCharCode(ZW_HIGH + i))
+];
 const ZW_VAL = new Map(ZW_ALL.map((c, i) => [c, i]));
+
+// Valeur d'un symbole zero-width, ou -1. Utilisée dans les boucles chaudes, où
+// une table coûterait plus cher que deux comparaisons.
+function zwValue(c) {
+    if (c >= ZW_LOW && c < ZW_LOW + ZW_LOW_N) return c - ZW_LOW;
+    if (c >= ZW_HIGH && c < ZW_HIGH + ZW_HIGH_N) return c - ZW_HIGH + ZW_LOW_N;
+    return -1;
+}
 
 // Alphabet du mode emoji : 16 emojis = les 16 valeurs hexa. Tous
 // single-codepoint, sans sélecteur de variation ni modificateur de teinte.
 // Déclaré ici avec les autres alphabets : le pré-filtre en a besoin bien avant
 // la section qui encode.
 export const EMOJI = ["😀", "😂", "😅", "😍", "🤔", "😎", "😭", "😡", "👍", "🔥", "🎉", "💀", "👀", "🚀", "🍕", "💯"];
-const EMOJI_INDEX = new Map(EMOJI.map((e, i) => [e, i]));
+const EMOJI_CP_INDEX = new Map(EMOJI.map((e, i) => [e.codePointAt(0), i]));
 
 // Sélecteurs de variation du mode compact (256 valeurs disponibles).
 function byteToVS(b) { return b < 16 ? 0xfe00 + b : 0xe0100 + (b - 16); }
@@ -143,8 +162,15 @@ function stripHidden(s) {
 // sélecteur de variation. Ceux de « ❤️ » ou « 🏳️‍🌈 » se retrouvent ainsi tous avant
 // la trame, donc absorbés par le décalage calculé au décodage — la couverture
 // garde son rendu exact au lieu d'être amputée.
-function firstCompactSlot(cover) {
-    const gs = graphemes(cover);
+function stripCompact(s) {
+    let out = "";
+    for (const ch of s) if (vsToByte(ch.codePointAt(0)) === null) out += ch;
+    return out;
+}
+
+const A_DES_SELECTEURS = /[\u{FE00}-\u{FE0F}]|[\u{E0100}-\u{E01EF}]/u;
+
+function firstCompactSlot(gs) {
     let idx = 0;
     for (let i = 0; i < gs.length; i++) {
         for (const ch of gs[i]) {
@@ -157,11 +183,19 @@ function firstCompactSlot(cover) {
 // Ce qu'un humain voit : le message débarrassé des symboles de nos alphabets.
 // Sert à reconnaître nos propres messages quand Discord nous les renvoie.
 export function visibleText(message) {
+    // Parcours par unité UTF-16 : `for...of` alloue une chaîne par caractère,
+    // ce qui coûtait 74 µs sur un message de 1300 unités contre 5 µs ici
+    // (mesuré). Appelé à chaque envoi et sur chacun de nos messages en retour.
     let out = "";
-    for (const ch of message) {
-        if (ZW_VAL.has(ch)) continue;
-        if (vsToByte(ch.codePointAt(0)) !== null) continue;
-        out += ch;
+    for (let i = 0; i < message.length; i++) {
+        const c = message.charCodeAt(i);
+        if ((c >= 0x200b && c <= 0x200d) || (c >= 0x2060 && c <= 0x2064)) continue;
+        if (c >= 0xfe00 && c <= 0xfe0f) continue;
+        if (c >= 0xdb40 && c <= 0xdb43 && i + 1 < message.length) {
+            const cp = (c - 0xd800) * 0x400 + (message.charCodeAt(i + 1) - 0xdc00) + 0x10000;
+            if (cp >= 0xe0100 && cp <= 0xe01ef) { i++; continue; }
+        }
+        out += message[i];
     }
     return out;
 }
@@ -207,7 +241,7 @@ export function scanSymbols(message, stop = {}) {
                 }
                 continue;
             }
-        } else if ((c >= 0x200b && c <= 0x200d) || (c >= 0x2060 && c <= 0x2064)) {
+        } else if (zwValue(c) >= 0) {
             if (++hidden >= stopHidden) break;
         } else if (c >= 0xfe00 && c <= 0xfe0f) {
             if (++compact >= stopCompact) break;
@@ -215,15 +249,6 @@ export function scanSymbols(message, stop = {}) {
         run = 0;
     }
     return { hidden, compact, emojiRun: bestRun };
-}
-
-// Compteurs simples, pour les tests et les mesures.
-export function countHiddenSymbols(message) {
-    return scanSymbols(message).hidden;
-}
-
-export function countCompactSymbols(message) {
-    return scanSymbols(message).compact;
 }
 
 // `bits` = 2 (sûr, 4 symboles) ou 3 (dense, 8 symboles). Le flux d'octets est
@@ -247,25 +272,27 @@ export async function encodeHidden(text, passphrase, { cover, bits = 3, context 
     // caractère invisible (mesuré), ce qu'un message Discord ordinaire ne fait
     // jamais. C'est le même défaut que l'en-tête de densité — une régularité
     // qui suffit à trier, sans rien décoder.
-    return scatter(stripHidden(requireCover(cover)), syms, { allowLeading: false });
+    return scatter(coverSlots(stripHidden(cover)), syms);
 }
 
 // Dépaquette un flux de symboles en octets pour une densité donnée.
 // Renvoie null si un symbole sort de l'alphabet annoncé.
 function unpackBits(syms, bits) {
     const alpha = 1 << bits;
-    let acc = 0, accBits = 0;
-    const bytes = [];
+    // La taille de sortie est connue d'avance : inutile de passer par un tableau
+    // JS puis de recopier (mesuré 5,5 -> 1,6 µs sur 550 octets).
+    const bytes = new Uint8Array((syms.length * bits) >> 3);
+    let acc = 0, accBits = 0, n = 0;
     for (const v of syms) {
         if (v >= alpha) return null;
         acc = (acc << bits) | v;
         accBits += bits;
         if (accBits >= 8) {
             accBits -= 8;
-            bytes.push((acc >> accBits) & 0xff);
+            bytes[n++] = (acc >> accBits) & 0xff;
         }
     }
-    return bytes.length ? new Uint8Array(bytes) : null; // bits restants = padding
+    return n ? bytes.subarray(0, n) : null; // bits restants = padding
 }
 
 // Renvoie le texte clair, ou null si pas de payload / mauvaise clé / mauvais
@@ -286,9 +313,7 @@ export async function decodeHidden(message, passphrase, { context = "" } = {}) {
     let max = 0;
     for (let i = 0; i < message.length; i++) {
         const c = message.charCodeAt(i);
-        let v = -1;
-        if (c >= 0x200b && c <= 0x200d) v = c - 0x200b;          // ZW[0..2]
-        else if (c >= 0x2060 && c <= 0x2064) v = c - 0x2060 + 3; // ZW[3..7]
+        const v = zwValue(c);
         if (v >= 0) {
             syms.push(v);
             if (v > max) max = v;
@@ -326,8 +351,22 @@ export async function encodeCompact(text, passphrase, { cover, context = "", pad
     const body = await seal(text, passphrase, context, padding);
     const syms = [];
     for (const b of body) syms.push(String.fromCodePoint(byteToVS(b)));
-    const base = requireCover(cover);
-    return scatter(base, syms, { allowLeading: false, fromGrapheme: firstCompactSlot(base) });
+    // Les sélecteurs que porte déjà la couverture doivent précéder les nôtres,
+    // donc le payload démarre après eux. Si cela ne laisse plus de place, on
+    // préfère amputer l'emoji de la couverture (« ❤️ » rendu « ❤ ») plutôt que
+    // de coller le payload en fin de message : le rendu se dégrade, la
+    // dissimulation non.
+    // Le balayage des graphèmes ne sert que si la couverture porte vraiment un
+    // sélecteur — un test d'expression régulière coûte 0,03 µs contre 20 µs de
+    // segmentation (mesuré), et le cas courant est « aucun ».
+    let base = cover, gs = coverSlots(base);
+    let depart = A_DES_SELECTEURS.test(base) ? firstCompactSlot(gs) : 0;
+    if (gs.length - depart < 1) {
+        base = stripCompact(cover);
+        gs = coverSlots(base);
+        depart = 0;
+    }
+    return scatter(gs, syms, depart);
 }
 
 // Renvoie le texte clair, ou null. Sans marqueur de départ, le décalage ne
@@ -366,8 +405,6 @@ export async function decodeCompact(message, passphrase, { context = "" } = {}) 
 // façon visible, la discrétion n'est pas son argument.
 const EMOJI_MAGIC = 0xc7;
 
-// La couverture est facultative ici, et n'est qu'un préfixe : la traînée
-// d'emojis est déjà visible, aucune phrase ne la dissimule.
 export async function encodeEmoji(text, passphrase, { cover, context = "", padding } = {}) {
     const body = await seal(text, passphrase, context, padding);
     let seq = EMOJI[EMOJI_MAGIC >> 4] + EMOJI[EMOJI_MAGIC & 0x0f];
@@ -379,9 +416,13 @@ export async function encodeEmoji(text, passphrase, { cover, context = "", paddi
 
 export async function decodeEmoji(message, passphrase, { context = "" } = {}) {
     const nibbles = [];
-    for (const ch of message) {
-        const i = EMOJI_INDEX.get(ch);
-        if (i !== undefined) nibbles.push(i);
+    for (let i = 0; i < message.length; i++) {
+        const c = message.charCodeAt(i);
+        if (c < 0xd800 || c > 0xdbff || i + 1 >= message.length) continue;
+        const cp = (c - 0xd800) * 0x400 + (message.charCodeAt(i + 1) - 0xdc00) + 0x10000;
+        i++;
+        const v = EMOJI_CP_INDEX.get(cp);
+        if (v !== undefined) nibbles.push(v);
     }
     let tries = 0;
     // Deux alignements possibles si un emoji parasite précède la séquence, et
@@ -391,6 +432,9 @@ export async function decodeEmoji(message, passphrase, { context = "" } = {}) {
         for (let i = off; i + 1 < nibbles.length; i += 2) bytes.push((nibbles[i] << 4) | nibbles[i + 1]);
         for (let s = bytes.indexOf(EMOJI_MAGIC); s >= 0; s = bytes.indexOf(EMOJI_MAGIC, s + 1)) {
             if (++tries > ATTEMPT_CAP) return null;
+            // Même filtre arithmétique que les autres modes : une longueur
+            // impossible est écartée sans dépenser un déchiffrement.
+            if (!plausibleFrame(bytes.length - s - 1)) continue;
             try {
                 return await unseal(new Uint8Array(bytes.slice(s + 1)), passphrase, context);
             } catch { /* MAGIC suivant / autre alignement */ }

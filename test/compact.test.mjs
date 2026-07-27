@@ -8,7 +8,7 @@ import { COVER, CTX, PASS, incompressible, invisibleCount, visible } from "./hel
 
 test("le texte visible est exactement la couverture", async () => {
     const cover = "ouais on se voit demain à 15h";
-    const msg = await encodeCompact("secret bien planqué", PASS, { cover: COVER, cover, context: CTX });
+    const msg = await encodeCompact("secret bien planqué", PASS, { cover, context: CTX });
     assert.equal(visible(msg), cover);
     assert.equal(await decodeCompact(msg, PASS, { context: CTX }), "secret bien planqué");
 });

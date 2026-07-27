@@ -88,7 +88,7 @@ test("deux envois du même secret ne produisent pas la même découpe", async ()
 test("la partie visible reste exactement la couverture", async () => {
     // Disperser ne doit rien faire apparaître : c'est toute la promesse.
     for (const cover of ["ok", "ouais tranquille et toi ?", "bon bah nickel 🙌"]) {
-        const msg = await encodeHidden("secret", PASS, { cover: COVER, cover, context: CTX });
+        const msg = await encodeHidden("secret", PASS, { cover, context: CTX });
         assert.equal(visible(msg), cover, `couverture "${cover}"`);
     }
 });
@@ -100,7 +100,7 @@ test("le mode compact préserve les emojis composés de la couverture", async ()
     const seg = new Intl.Segmenter();
     const count = t => [...seg.segment(t)].length;
     for (const cover of ["bravo 🏳️‍🌈 voilà", "coucou 👨‍👩‍👧 ça va", "trop hâte ❤️ à toute"]) {
-        const msg = await encodeCompact("secret", PASS, { cover: COVER, cover, context: CTX });
+        const msg = await encodeCompact("secret", PASS, { cover, context: CTX });
         assert.ok(isSubsequence(cover, msg), `couverture amputée : "${cover}"`);
         assert.equal(count(msg), count(cover), `graphème coupé : "${cover}"`);
         assert.equal(await decodeCompact(msg, PASS, { context: CTX }), "secret");
@@ -109,7 +109,7 @@ test("le mode compact préserve les emojis composés de la couverture", async ()
 
 test("le mode invisible préserve les couvertures sans liant", async () => {
     for (const cover of ["trop hâte ❤️ à toute", "ok ça marche 👍", "bien vu ⚠️ attention"]) {
-        const msg = await encodeHidden("secret", PASS, { cover: COVER, cover, context: CTX });
+        const msg = await encodeHidden("secret", PASS, { cover, context: CTX });
         assert.ok(isSubsequence(cover, msg), `couverture amputée : "${cover}"`);
         assert.equal(await decodeHidden(msg, PASS, { context: CTX }), "secret");
     }
@@ -122,7 +122,7 @@ test("le mode invisible ampute les emojis à liant, et c'est documenté", async 
     // épinglé ici pour qu'il ne surprenne personne — la seule autre issue
     // possible serait de corrompre le payload.
     const cover = "coucou 👨\u200d👩\u200d👧 ça va";
-    const msg = await encodeHidden("secret", PASS, { cover: COVER, cover, context: CTX });
+    const msg = await encodeHidden("secret", PASS, { cover, context: CTX });
     // Comparer le texte VISIBLE, pas une sous-séquence : le payload dispersé
     // contient lui-même des liants, et l'un d'eux pourrait tomber entre deux
     // emojis et satisfaire la recherche par hasard. La règle est déterministe.

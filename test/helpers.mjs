@@ -41,13 +41,20 @@ export function makeRng(seed = 1) {
 
 // Plus longue série CONTIGUË de caractères invisibles : c'est ce que cherche un
 // détecteur générique, donc la métrique à surveiller.
-export function longestInvisibleRun(s) {
+//
+// `estSymbole` permet de restreindre au seul alphabet d'un mode. Sans lui,
+// l'audit et les tests calculaient la même métrique de deux façons, sous le même
+// nom, et pouvaient donc constater des choses différentes.
+export const estInvisible = ch => {
+    const cp = ch.codePointAt(0);
+    return (cp >= 0x200b && cp <= 0x200d) || (cp >= 0x2060 && cp <= 0x2064)
+        || (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef);
+};
+
+export function longestInvisibleRun(s, estSymbole = estInvisible) {
     let best = 0, cur = 0;
     for (const ch of s) {
-        const cp = ch.codePointAt(0);
-        const inv = (cp >= 0x200b && cp <= 0x200d) || (cp >= 0x2060 && cp <= 0x2064)
-            || (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef);
-        cur = inv ? cur + 1 : 0;
+        cur = estSymbole(ch) ? cur + 1 : 0;
         if (cur > best) best = cur;
     }
     return best;

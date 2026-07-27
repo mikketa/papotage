@@ -79,7 +79,8 @@ exact : le message n'est jamais avalé silencieusement par Discord.
   fixe, plus de traînée d'un seul tenant, et le payload ne touche ni le début ni la
   fin du message. La longueur reste corrélée à celle du secret — brouillée par un
   remplissage aléatoire, et bien davantage en mode paliers. `npm run audit` vérifie
-  tout ça sur 600 messages par mode, et tourne en intégration continue.
+  tout ça sur 600 messages par mode — moyenne **et pire cas** — et tourne en
+  intégration continue.
 - **Confiance dans le client** : le texte est en clair dans le client au moment où on
   le tape, et le mot de passe est stocké en clair dans les réglages Vencord
   (`settings.json`).
@@ -113,7 +114,7 @@ npm run audit   # cherche les régularités exploitables dans les messages produ
 npm run bench   # mesures de performance
 ```
 
-116 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
+115 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
 salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), les
 règles d'envoi du plugin, les propriétés de discrétion (absence de marqueur fixe,
 dispersion du payload, intégrité des emojis de couverture, variété des phrases) et la
@@ -149,10 +150,16 @@ index.tsx          câblage Vencord (bouton, événements, toasts)
        └─ envelope
 ```
 
+`test/architecture.test.mjs` fait respecter ce graphe : il refuse un import hors des
+dépendances déclarées, un import Vencord ailleurs que dans le câblage, une couche
+court-circuitée, un cycle — et un fichier ajouté dans `src/` qui ne serait déclaré
+nulle part.
+
 - `src/envelope.mjs` — la partie sensible, isolée pour être relisible seule (224 lignes)
 - `src/codec.mjs` — encodages et dispersion ; ne chiffre rien, ne choisit pas la couverture
 - `src/covers.mjs` — génération des phrases de couverture
 - `src/random.mjs` — tirage aléatoire uniforme partagé
+- `src/graphemes.mjs` — découpage en graphèmes, partagé par le codec et les couvertures
 - `src/plugin-core.mjs` — règles d'envoi et de réception, sans dépendance Vencord
 - `src/index.tsx` — câblage Vencord
 - `test/` — suite de tests (`node:test`), dont `architecture.test.mjs` qui applique la règle ci-dessus

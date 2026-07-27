@@ -14,6 +14,7 @@
 // ne pas se répéter. Un utilisateur qui préfère ses propres phrases peut
 // fournir sa liste : le pool ci-dessous est public, donc connu de l'adversaire.
 
+import { graphemeCount } from "./graphemes.mjs";
 import { pickOne as pick, randomInt } from "./random.mjs";
 
 const SHORT = [
@@ -125,6 +126,16 @@ const longest = list => Math.max(...list.map(s => s.length));
 export const MAX_AUTO_COVER_LEN =
     longest(OPENERS) + 2 + longest(FOLLOWS) + longest(TAILS);
 
+// Une couverture n'est pas qu'une phrase crédible : c'est l'espace dans lequel
+// le payload se disperse. Chaque intervalle entre deux graphèmes est un
+// emplacement ; une phrase de deux graphèmes n'en offre qu'un, donc le payload
+// y forme un bloc unique — exactement la signature qu'on cherche à éviter.
+//
+// Mesuré sur 800 messages avec l'ancien tirage : les couvertures de 2 graphèmes
+// donnaient 100 % de série contiguë, celles de 3 graphèmes 77 %, celles de 5
+// graphèmes 49 %. Au-delà de 8, on retombe sous le seuil visé.
+export const MIN_COVER_GRAPHEMES = 8;
+
 // Mémoire des dernières couvertures produites. Sans elle, un tirage uniforme
 // sur 40 ouvertures répète la même phrase au bout de ~8 messages (paradoxe des
 // anniversaires) — exactement le motif qu'un lecteur du salon remarque.
@@ -137,13 +148,19 @@ function remember(cover) {
     return cover;
 }
 
-// Tire jusqu'à obtenir une phrase absente des derniers tirages. Le nombre
-// d'essais est borné : avec un pool minuscule fourni par l'utilisateur, on
-// finit par accepter une répétition plutôt que de boucler.
-function pickFresh(generate, tries = 12) {
+// Tire jusqu'à obtenir une phrase à la fois inédite et assez longue pour
+// disperser. Le nombre d'essais est borné : avec un pool minuscule fourni par
+// l'utilisateur, on finit par accepter ce qu'on a plutôt que de boucler.
+function pickFresh(generate, min, tries = 24) {
     let cover = generate();
-    for (let i = 0; i < tries && recent.includes(cover); i++) cover = generate();
-    return remember(cover);
+    let repli = cover; // meilleure phrase vue, si aucune ne satisfait tout
+    for (let i = 0; i < tries; i++) {
+        const assezLongue = graphemeCount(cover) >= min;
+        if (assezLongue && !recent.includes(cover)) return remember(cover);
+        if (assezLongue) repli = cover;
+        cover = generate();
+    }
+    return remember(repli);
 }
 
 function generateAuto() {
@@ -163,14 +180,16 @@ export function parseCoverPool(text) {
 }
 
 // Couverture à utiliser :
-//   1. `custom` — phrase imposée pour ce message précis ;
-//   2. `pool`   — liste perso de l'utilisateur (le pool intégré est public,
-//                 donc connu de quiconque lit le code) ;
-//   3. sinon    — génération par gabarits.
-export function pickCover(custom, { pool } = {}) {
+//   1. `custom` — phrase imposée pour ce message précis. Reprise telle quelle :
+//      l'utilisateur a demandé cette phrase-là. Si elle est trop courte pour
+//      disperser, le codec refusera d'encoder plutôt que de produire un message
+//      qui se repère.
+//   2. `pool` — liste perso (le pool intégré est public, donc connu).
+//   3. sinon — génération par gabarits, contrainte à `min` graphèmes.
+export function pickCover(custom, { pool, min = MIN_COVER_GRAPHEMES } = {}) {
     if (custom && custom.trim()) return custom.trim();
-    if (pool && pool.length) return pickFresh(() => pick(pool));
-    return pickFresh(generateAuto);
+    if (pool && pool.length) return pickFresh(() => pick(pool), min);
+    return pickFresh(generateAuto, min);
 }
 
 // Vide la mémoire anti-répétition (tests, changement de pool).

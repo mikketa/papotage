@@ -26,6 +26,7 @@ import {
     encodeOutgoing,
     isPapotageMessage,
     LOCK_PREFIX,
+    MIN_COVER_GRAPHEMES,
     MODE,
     PADDING,
     PapotageError,
@@ -74,7 +75,12 @@ const settings = definePluginSettings({
     customCover: {
         type: OptionType.STRING,
         description: "Phrase de couverture perso par défaut (vide = phrase naturelle aléatoire)",
-        default: ""
+        default: "",
+        // Une couverture courte n'offre pas assez d'intervalles pour répartir la
+        // partie invisible : le message part en un bloc, ce qui se repère. Mieux
+        // vaut le dire ici qu'au moment de l'envoi.
+        isValid: (v: string) => !v || v.trim().length >= MIN_COVER_GRAPHEMES
+            || `Trop courte : sous ${MIN_COVER_GRAPHEMES} caractères, la partie invisible ne peut pas se répartir et forme un bloc repérable.`
     },
     coverPool: {
         type: OptionType.STRING,
