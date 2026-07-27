@@ -78,23 +78,12 @@ function parseInput(raw, separator) {
 // l'appelant doit annuler l'envoi. C'est le point le plus important du plugin —
 // un échec silencieux ici publie le message en clair.
 export async function encodeOutgoing({
-    raw,
-    passphrase,
-    mode = MODE.HIDDEN,
-    defaultCover = "",
-    separator = DEFAULT_SEPARATOR,
-    context = "",
-    maxChars = MAX_MESSAGE_CHARS,
-    padding = PADDING.BLOCK,
-    pool = []
+    raw, passphrase, mode = MODE.HIDDEN, defaultCover = "", separator = DEFAULT_SEPARATOR,
+    context = "", maxChars = MAX_MESSAGE_CHARS, padding = PADDING.BLOCK, pool = []
 }) {
-    if (!passphrase) {
-        throw new PapotageError("no-passphrase",
-            "Papotage : aucun mot de passe défini. Message NON envoyé (il serait parti en clair).");
-    }
-    if (!raw || !raw.trim()) {
-        throw new PapotageError("empty", "Papotage : message vide.");
-    }
+    if (!passphrase) throw new PapotageError("no-passphrase",
+        "Papotage : aucun mot de passe défini. Message NON envoyé (il serait parti en clair).");
+    if (!raw || !raw.trim()) throw new PapotageError("empty", "Papotage : message vide.");
 
     const { cover, secret } = parseInput(raw, resolveSeparator(separator));
     // Le choix de la phrase affichée se fait ICI : c'est une décision de produit.
@@ -116,12 +105,10 @@ export async function encodeOutgoing({
 
     // Discord rejette silencieusement au-delà de 2000 : mieux vaut annuler avec
     // une explication que laisser le message disparaître sans rien dire.
-    if (content.length > maxChars) {
-        throw new PapotageError("too-long",
-            `Papotage : message trop long de ${content.length - maxChars} caractères une fois chiffré `
-            + `(${content.length} / ${maxChars}). Coupe-le en deux`
-            + (mode === MODE.HIDDEN ? " ou passe en mode compact." : "."));
-    }
+    if (content.length > maxChars) throw new PapotageError("too-long",
+        `Papotage : message trop long de ${content.length - maxChars} caractères une fois chiffré `
+        + `(${content.length} / ${maxChars}). Coupe-le en deux`
+        + (mode === MODE.HIDDEN ? " ou passe en mode compact." : "."));
     return content;
 }
 
@@ -198,9 +185,9 @@ export class SeenCache {
         this.map = new Map(); // Map = ordre d'insertion : les plus anciens d'abord
     }
 
-    has(id, content) {
-        return this.map.get(id) === content;
-    }
+    has(id, content) { return this.map.get(id) === content; }
+    clear() { this.map.clear(); }
+    get size() { return this.map.size; }
 
     set(id, content) {
         if (this.map.size >= this.max) {
@@ -208,14 +195,6 @@ export class SeenCache {
             for (const k of this.map.keys()) { this.map.delete(k); if (--n === 0) break; }
         }
         this.map.set(id, content);
-    }
-
-    clear() {
-        this.map.clear();
-    }
-
-    get size() {
-        return this.map.size;
     }
 }
 
@@ -234,6 +213,8 @@ export class SendLedger {
         this.max = max;
         this.pending = [];
     }
+
+    get size() { return this.pending.length; }
 
     remember(content) {
         if (this.pending.length >= this.max) this.pending.shift();
@@ -259,9 +240,5 @@ export class SendLedger {
         if (!near) return null;
         near.settled = true;
         return "altered";
-    }
-
-    get size() {
-        return this.pending.length;
     }
 }

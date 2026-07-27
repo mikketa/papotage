@@ -123,16 +123,10 @@ function deriveKey(passphrase, context = "") {
     }
     const key = (async () => {
         const salt = await crypto.subtle.digest("SHA-256", ENC.encode(`${DOMAIN}|${context}`));
-        const base = await crypto.subtle.importKey(
-            "raw", ENC.encode(passphrase), "PBKDF2", false, ["deriveKey"]
-        );
+        const base = await crypto.subtle.importKey("raw", ENC.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
         return crypto.subtle.deriveKey(
             { name: "PBKDF2", salt: new Uint8Array(salt), iterations: ITER, hash: "SHA-256" },
-            base,
-            { name: "AES-GCM", length: 256 },
-            false,
-            ["encrypt", "decrypt"]
-        );
+            base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     })();
     key.catch(() => keyCache.delete(id)); // ne pas garder un échec en cache
     if (keyCache.size >= KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
@@ -164,8 +158,7 @@ export async function seal(text, passphrase, context = "", padding = PADDING.BLO
 
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
     const ct = await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv: nonce, tagLength: TAG_BITS }, key, frame(flags, body, padding)
-    );
+        { name: "AES-GCM", iv: nonce, tagLength: TAG_BITS }, key, frame(flags, body, padding));
     return concat([nonce, new Uint8Array(ct)], NONCE_LEN + ct.byteLength);
 }
 
@@ -175,9 +168,7 @@ export async function unseal(bytes, passphrase, context = "") {
     const key = await deriveKey(passphrase, context);
     const padded = new Uint8Array(await crypto.subtle.decrypt(
         { name: "AES-GCM", iv: bytes.subarray(0, NONCE_LEN), tagLength: TAG_BITS },
-        key,
-        bytes.subarray(NONCE_LEN)
-    ));
+        key, bytes.subarray(NONCE_LEN)));
     const inner = unframe(padded);
     const body = inner.subarray(1);
     return (inner[0] & FLAG_ZIPPED) === 0 ? DEC.decode(body) : DEC.decode(await inflate(body));

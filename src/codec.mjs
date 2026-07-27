@@ -275,6 +275,18 @@ function unpackBits(syms, bits) {
     return n ? bytes.subarray(0, n) : null; // bits restants = padding
 }
 
+// Ouvre une trame candidate, ou null : mauvaise clé, mauvais contexte, message
+// d'un inconnu, longueur impossible. Les trois décodeurs s'en servent — un
+// message illisible n'est jamais une exception, c'est le cas courant.
+async function open(bytes, passphrase, context) {
+    if (!plausibleFrame(bytes.length)) return null;
+    try {
+        return await unseal(bytes, passphrase, context);
+    } catch {
+        return null;
+    }
+}
+
 // Renvoie le texte clair, ou null si pas de payload / mauvaise clé / mauvais
 // contexte. Les symboles sont ramassés dans l'ordre du texte, où qu'ils soient :
 // aucun marqueur de début n'est nécessaire, et du texte ajouté après coup
@@ -297,10 +309,8 @@ export async function decodeHidden(message, passphrase, { context = "" } = {}) {
     if (syms.length < 8) return null;
     for (const bits of max >= 4 ? [3] : [2, 3]) { // >= 4 : forcément l'alphabet 3 bits
         const bytes = unpackBits(syms, bits);
-        if (!bytes || !plausibleFrame(bytes.length)) continue;
-        try {
-            return await unseal(bytes, passphrase, context);
-        } catch { /* densité suivante */ }
+        const texte = bytes && await open(bytes, passphrase, context);
+        if (texte != null) return texte;
     }
     return null;
 }
@@ -361,12 +371,8 @@ export async function decodeCompact(message, passphrase, { context = "" } = {}) 
         if (cp >= 0) i++;
     }
     const skew = ((bytes.length - FRAME_HEAD) % PAD_BLOCK + PAD_BLOCK) % PAD_BLOCK;
-    if (skew > MAX_SKEW || !plausibleFrame(bytes.length - skew)) return null;
-    try {
-        return await unseal(new Uint8Array(bytes.slice(skew)), passphrase, context);
-    } catch {
-        return null;
-    }
+    if (skew > MAX_SKEW) return null;
+    return open(new Uint8Array(bytes.slice(skew)), passphrase, context);
 }
 
 // ===========================================================================
@@ -406,12 +412,8 @@ export async function decodeEmoji(message, passphrase, { context = "" } = {}) {
         for (let i = off; i + 1 < nibbles.length; i += 2) bytes.push((nibbles[i] << 4) | nibbles[i + 1]);
         for (let s = bytes.indexOf(EMOJI_MAGIC); s >= 0; s = bytes.indexOf(EMOJI_MAGIC, s + 1)) {
             if (++tries > ATTEMPT_CAP) return null;
-            // Même filtre arithmétique que les autres modes : une longueur
-            // impossible est écartée sans dépenser un déchiffrement.
-            if (!plausibleFrame(bytes.length - s - 1)) continue;
-            try {
-                return await unseal(new Uint8Array(bytes.slice(s + 1)), passphrase, context);
-            } catch { /* MAGIC suivant / autre alignement */ }
+            const texte = await open(new Uint8Array(bytes.slice(s + 1)), passphrase, context);
+            if (texte != null) return texte; // sinon : MAGIC suivant, autre alignement
         }
     }
     return null;

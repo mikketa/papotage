@@ -11,10 +11,8 @@
 
 import { addChatBarButton, ChatBarButton, ChatBarButtonFactory, removeChatBarButton } from "@api/ChatButtons";
 import {
-    addMessagePreEditListener,
-    addMessagePreSendListener,
-    removeMessagePreEditListener,
-    removeMessagePreSendListener
+    addMessagePreEditListener, addMessagePreSendListener,
+    removeMessagePreEditListener, removeMessagePreSendListener
 } from "@api/MessageEvents";
 import { updateMessage } from "@api/MessageUpdater";
 import { definePluginSettings } from "@api/Settings";
@@ -22,27 +20,15 @@ import definePlugin, { OptionType } from "@utils/types";
 import { FluxDispatcher, MessageStore, SelectedChannelStore, Toasts, UserStore, useState } from "@webpack/common";
 
 import {
-    decodeIncoming,
-    encodeOutgoing,
-    isPapotageMessage,
-    LOCK_PREFIX,
-    MIN_COVER_GRAPHEMES,
-    MODE,
-    PADDING,
-    PapotageError,
-    SeenCache,
-    SendLedger,
-    forgetKeys,
-    parseCoverPool,
-    stripMarkers,
-    warmKey
+    decodeIncoming, encodeOutgoing, forgetKeys, isPapotageMessage, LOCK_PREFIX,
+    MIN_COVER_GRAPHEMES, MODE, PADDING, PapotageError, parseCoverPool,
+    SeenCache, SendLedger, stripMarkers, warmKey
 } from "./plugin-core.mjs";
 
 const settings = definePluginSettings({
     passphrase: {
-        type: OptionType.STRING,
+        type: OptionType.STRING, default: "",
         description: "Mot de passe partagé (identique chez tous les participants)",
-        default: "",
         // 600 000 itérations PBKDF2 ne rachètent pas un mot de passe de six
         // caractères : c'est la façon la plus réaliste de casser Papotage.
         isValid: (v: string) => !v || v.length >= 12
@@ -52,30 +38,23 @@ const settings = definePluginSettings({
         type: OptionType.SELECT,
         description: "Encodage du secret",
         options: [
-            {
-                label: "Invisible dense — recommandé (caractères zero-width, 3 bits/car)",
-                value: MODE.HIDDEN,
-                default: true
-            },
+            { label: "Invisible dense — recommandé (zero-width, 3 bits/car)", value: MODE.HIDDEN, default: true },
             { label: "Invisible sûr — jeu de caractères minimal, messages plus longs", value: MODE.HIDDEN_SAFE },
             { label: "Compact — le plus court (sélecteurs de variation)", value: MODE.COMPACT },
             { label: "Emoji — visible et bizarre, pour messages courts", value: MODE.EMOJI }
         ]
     },
     autoDecrypt: {
-        type: OptionType.BOOLEAN,
-        description: "Déchiffrer automatiquement les messages reçus",
-        default: true
+        type: OptionType.BOOLEAN, default: true,
+        description: "Déchiffrer automatiquement les messages reçus"
     },
     showLock: {
-        type: OptionType.BOOLEAN,
-        description: "Afficher un 🔓 devant les messages déchiffrés (pour les distinguer)",
-        default: true
+        type: OptionType.BOOLEAN, default: true,
+        description: "Afficher un 🔓 devant les messages déchiffrés (pour les distinguer)"
     },
     customCover: {
-        type: OptionType.STRING,
+        type: OptionType.STRING, default: "",
         description: "Phrase de couverture perso par défaut (vide = phrase naturelle aléatoire)",
-        default: "",
         // Une couverture courte n'offre pas assez d'intervalles pour répartir la
         // partie invisible : le message part en un bloc, ce qui se repère. Mieux
         // vaut le dire ici qu'au moment de l'envoi.
@@ -83,22 +62,18 @@ const settings = definePluginSettings({
             || `Trop courte : sous ${MIN_COVER_GRAPHEMES} caractères, la partie invisible ne peut pas se répartir et forme un bloc repérable.`
     },
     coverPool: {
-        type: OptionType.STRING,
-        multiline: true,
+        type: OptionType.STRING, default: "", multiline: true,
         description: "Tes propres phrases de couverture, une par ligne "
-            + "(le pool intégré est public, donc connu de qui lit le code)",
-        default: ""
+            + "(le pool intégré est public, donc connu de qui lit le code)"
     },
     lengthHiding: {
-        type: OptionType.BOOLEAN,
+        type: OptionType.BOOLEAN, default: false,
         description: "Masquer la longueur : rembourre par paliers au lieu de blocs de 16 octets. "
-            + "Plus discret, mais les messages courts deviennent nettement plus longs",
-        default: false
+            + "Plus discret, mais les messages courts deviennent nettement plus longs"
     },
     separator: {
-        type: OptionType.STRING,
-        description: "Séparateur 'couverture | secret' pour écrire soi-même la phrase visible",
-        default: " | "
+        type: OptionType.STRING, default: " | ",
+        description: "Séparateur 'couverture | secret' pour écrire soi-même la phrase visible"
     }
 });
 

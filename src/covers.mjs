@@ -20,75 +20,30 @@ const SHORT = [
 ];
 
 const OPENERS = [
-    "ok ça marche",
-    "ah ouais carrément",
-    "mdr t'es sérieux",
-    "ouais je te suis là-dessus",
-    "franchement pas faux",
-    "haha ok je note",
-    "nickel on fait comme ça",
-    "attends je check et je reviens",
-    "ptdr ouais grave",
-    "hmm ok pourquoi pas",
-    "genre ouais je vois",
-    "bah écoute ça me va",
-    "ah d'accord je comprends mieux",
-    "oui oui t'inquiète",
-    "mouais à voir",
-    "ok reçu",
-    "ah bah tiens",
-    "bon bah nickel",
-    "j'avoue ouais",
-    "ah mais oui suis bête",
-    "ouais non t'as raison",
-    "attends deux secondes",
-    "ok je regarde ça",
-    "haha n'importe quoi",
-    "bon ok ça marche pour moi",
-    "ouais enfin bon",
-    "ah ok je vois le truc",
-    "mdr arrête",
-    "ouais c'est clair",
-    "bah oui logique",
-    "ok noté merci",
-    "hmm je sais pas trop",
-    "ah si si je me souviens",
-    "ouais ça se tente",
-    "bon on verra bien",
-    "ok parfait",
-    "ah mince ok",
-    "ouais pas de souci",
-    "bon bref",
+    "ok ça marche", "ah ouais carrément", "mdr t'es sérieux", "ouais je te suis là-dessus",
+    "franchement pas faux", "haha ok je note", "nickel on fait comme ça", "ptdr ouais grave",
+    "attends je check et je reviens", "hmm ok pourquoi pas", "genre ouais je vois",
+    "bah écoute ça me va", "ah d'accord je comprends mieux", "oui oui t'inquiète",
+    "mouais à voir", "ok reçu", "ah bah tiens", "bon bah nickel", "j'avoue ouais",
+    "ah mais oui suis bête", "ouais non t'as raison", "attends deux secondes",
+    "ok je regarde ça", "haha n'importe quoi", "bon ok ça marche pour moi", "ouais enfin bon",
+    "ah ok je vois le truc", "mdr arrête", "ouais c'est clair", "bah oui logique",
+    "ok noté merci", "hmm je sais pas trop", "ah si si je me souviens", "ouais ça se tente",
+    "bon on verra bien", "ok parfait", "ah mince ok", "ouais pas de souci", "bon bref",
     "ah ouais quand même"
 ];
 
 // Deuxième proposition, pour les gabarits en deux temps.
 const FOLLOWS = [
-    "je te redis",
-    "on verra",
-    "faut voir",
-    "j'y pense",
-    "je note",
-    "ça marche",
-    "pas de souci",
-    "je te tiens au courant",
-    "à voir demain",
-    "on en reparle",
-    "je check",
-    "faut que j'y réfléchisse"
+    "je te redis", "on verra", "faut voir", "j'y pense", "je note", "ça marche",
+    "pas de souci", "je te tiens au courant", "à voir demain", "on en reparle",
+    "je check", "faut que j'y réfléchisse"
 ];
 
 const QUESTIONS = [
-    "t'en penses quoi ?",
-    "tu fais quoi ce soir ?",
-    "c'est bon pour toi ?",
-    "on dit quoi du coup ?",
-    "t'es dispo quand ?",
-    "ça te va ?",
-    "tu confirmes ?",
-    "et sinon quoi de neuf ?",
-    "tu pars à quelle heure ?",
-    "c'était bien ?"
+    "t'en penses quoi ?", "tu fais quoi ce soir ?", "c'est bon pour toi ?",
+    "on dit quoi du coup ?", "t'es dispo quand ?", "ça te va ?", "tu confirmes ?",
+    "et sinon quoi de neuf ?", "tu pars à quelle heure ?", "c'était bien ?"
 ];
 
 // Suffixes optionnels. La chaîne vide domine : une phrase sur deux avec emoji
@@ -108,14 +63,9 @@ const SHAPES = [
 
 const TOTAL_WEIGHT = SHAPES.reduce((n, s) => n + s.weight, 0);
 
-// Nombre de sorties distinctes possibles, tous gabarits confondus.
-export const COVER_POOL_SIZE =
-    SHORT.length
-    + OPENERS.length
-    + OPENERS.length * new Set(TAILS).size
-    + OPENERS.length * FOLLOWS.length
-    + QUESTIONS.length
-    + SHORT.length * FOLLOWS.length;
+// Nombre de sorties distinctes possibles, un terme par pool de départ.
+export const COVER_POOL_SIZE = SHORT.length * (1 + FOLLOWS.length)
+    + OPENERS.length * (1 + new Set(TAILS).size + FOLLOWS.length) + QUESTIONS.length;
 
 // Majorant de la longueur d'une couverture automatique : sert à réserver la
 // place dans le budget de caractères d'un message.
@@ -157,10 +107,7 @@ function pickFresh(generate, min, tries = 24) {
 
 function generateAuto() {
     let roll = randomInt(TOTAL_WEIGHT);
-    for (const shape of SHAPES) {
-        if (roll < shape.weight) return shape.build();
-        roll -= shape.weight;
-    }
+    for (const { weight, build } of SHAPES) if ((roll -= weight) < 0) return build();
     return pick(OPENERS); // inatteignable, filet de sécurité
 }
 
