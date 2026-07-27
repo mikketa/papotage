@@ -186,13 +186,16 @@ chiffrement est effectivement armé ; ailleurs la clé est dérivée à la deman
 ## Messages illisibles
 
 Un message chiffré qu'on ne sait pas lire — mauvais mot de passe, autre salon, autre
-version du format — est signalé par un 🔒 devant la phrase de couverture. Sans ce
-marqueur, l'échec est parfaitement silencieux : on voit une réponse anodine et on
-ignore qu'un message nous a échappé. Le seuil de détection étant très au-dessus de ce
-qu'un humain tape, un faux positif est hors d'atteinte.
+version du format — n'est signalé **par rien** : il s'affiche comme la phrase banale
+qu'il est pour tout le monde. C'est un choix, pas un oubli. Un marqueur à l'écran
+apprendrait certes à l'utilisateur qu'un message lui a échappé, mais il le trahirait
+devant un témoin ou un partage d'écran, et il le ferait précisément sur les messages
+qu'il ne peut pas lire — ceux dont il n'a aucun moyen de justifier la présence. Le
+silence fait partie de la couverture.
 
-Le marqueur est un ajout d'affichage : il est retiré si l'auteur édite le message, il
-ne part jamais dans le salon.
+Le seul marqueur du plugin est le 🔓 optionnel devant les messages **déchiffrés**,
+pour les distinguer du bavardage. C'est un ajout d'affichage : il est retiré si
+l'auteur édite le message, il ne part jamais dans le salon.
 
 ## L'audit, écrit pour nous-mêmes
 

@@ -1,18 +1,14 @@
 // Phrases de couverture : ce que voit un observateur qui n'a pas le plugin.
 //
-// Le point faible d'un canal stéganographique, ce n'est pas le chiffrement,
-// c'est la régularité. Trois régularités se repèrent à l'œil nu, sans aucun
-// outil, juste en lisant le salon :
+// Le point faible d'un canal stéganographique n'est pas le chiffrement, c'est la
+// régularité — et trois régularités se repèrent sans aucun outil, juste en
+// lisant le salon : toujours les mêmes phrases, toujours la même FORME, et la
+// même phrase deux fois à quelques messages d'écart (ce qu'un tirage uniforme
+// produit très vite). D'où plusieurs gabarits composés à partir de pools
+// séparés, et une mémoire des derniers tirages.
 //
-//   1. le vocabulaire — toujours les mêmes phrases ;
-//   2. la FORME — toujours la même longueur, la même structure ;
-//   3. la répétition rapprochée — deux fois la même phrase à trois messages
-//      d'écart, ce qu'un tirage aléatoire uniforme produit très vite.
-//
-// D'où : plusieurs gabarits de phrase (du "ok" sec à la question complète),
-// composés à partir de pools séparés, et une mémoire des derniers tirages pour
-// ne pas se répéter. Un utilisateur qui préfère ses propres phrases peut
-// fournir sa liste : le pool ci-dessous est public, donc connu de l'adversaire.
+// Le pool ci-dessous est public, donc connu de l'adversaire : le réglage
+// *Cover Pool* existe pour qui préfère ses propres phrases.
 
 import { graphemeCount } from "./graphemes.mjs";
 import { pickOne as pick, randomInt } from "./random.mjs";
@@ -121,39 +117,35 @@ export const COVER_POOL_SIZE =
     + QUESTIONS.length
     + SHORT.length * FOLLOWS.length;
 
-// Majorant de la longueur d'une couverture automatique.
+// Majorant de la longueur d'une couverture automatique : sert à réserver la
+// place dans le budget de caractères d'un message.
 const longest = list => Math.max(...list.map(s => s.length));
-export const MAX_AUTO_COVER_LEN =
-    longest(OPENERS) + 2 + longest(FOLLOWS) + longest(TAILS);
+export const MAX_AUTO_COVER_LEN = longest(OPENERS) + 2 + longest(FOLLOWS) + longest(TAILS);
 
-// Une couverture n'est pas qu'une phrase crédible : c'est l'espace dans lequel
-// le payload se disperse. Chaque intervalle entre deux graphèmes est un
-// emplacement ; une phrase de deux graphèmes n'en offre qu'un, donc le payload
-// y forme un bloc unique — exactement la signature qu'on cherche à éviter.
-//
-// Mesuré sur 800 messages avec l'ancien tirage : les couvertures de 2 graphèmes
-// donnaient 100 % de série contiguë, celles de 3 graphèmes 77 %, celles de 5
-// graphèmes 49 %. Au-delà de 8, on retombe sous le seuil visé.
+// Une couverture n'est pas qu'une phrase crédible : c'est l'espace dans lequel le
+// payload se disperse, un intervalle entre graphèmes par emplacement. Mesuré sur
+// 800 messages : les couvertures de 2 graphèmes donnaient 100 % de série
+// contiguë, celles de 3 graphèmes 77 %, celles de 5 graphèmes 49 %. À partir de
+// 8, on retombe sous le seuil visé.
 export const MIN_COVER_GRAPHEMES = 8;
 
-// Mémoire des dernières couvertures produites. Sans elle, un tirage uniforme
-// sur 40 ouvertures répète la même phrase au bout de ~8 messages (paradoxe des
+// Mémoire des dernières couvertures produites. Sans elle, un tirage uniforme sur
+// 40 ouvertures répète la même phrase au bout de ~8 messages (paradoxe des
 // anniversaires) — exactement le motif qu'un lecteur du salon remarque.
 const RECENT_MAX = 16;
 const recent = [];
 
+// Tire jusqu'à obtenir une phrase à la fois inédite et assez longue pour
+// disperser. Le nombre d'essais est borné : avec un pool minuscule fourni par
+// l'utilisateur, on finit par accepter ce qu'on a plutôt que de boucler.
 function remember(cover) {
     recent.push(cover);
     if (recent.length > RECENT_MAX) recent.shift();
     return cover;
 }
 
-// Tire jusqu'à obtenir une phrase à la fois inédite et assez longue pour
-// disperser. Le nombre d'essais est borné : avec un pool minuscule fourni par
-// l'utilisateur, on finit par accepter ce qu'on a plutôt que de boucler.
 function pickFresh(generate, min, tries = 24) {
-    let cover = generate();
-    let repli = cover; // meilleure phrase vue, si aucune ne satisfait tout
+    let cover = generate(), repli = cover; // repli : meilleure phrase vue jusqu'ici
     for (let i = 0; i < tries; i++) {
         const assezLongue = graphemeCount(cover) >= min;
         if (assezLongue && !recent.includes(cover)) return remember(cover);
@@ -175,8 +167,7 @@ function generateAuto() {
 // Découpe une liste fournie par l'utilisateur. Le champ de réglage Vencord est
 // mono-ligne, donc on accepte aussi le point-virgule comme séparateur.
 export function parseCoverPool(text) {
-    if (!text) return [];
-    return text.split(/[\n;]/).map(s => s.trim()).filter(Boolean);
+    return text ? text.split(/[\n;]/).map(s => s.trim()).filter(Boolean) : [];
 }
 
 // Couverture à utiliser :
@@ -188,8 +179,7 @@ export function parseCoverPool(text) {
 //   3. sinon — génération par gabarits, contrainte à `min` graphèmes.
 export function pickCover(custom, { pool, min = MIN_COVER_GRAPHEMES } = {}) {
     if (custom && custom.trim()) return custom.trim();
-    if (pool && pool.length) return pickFresh(() => pick(pool), min);
-    return pickFresh(generateAuto, min);
+    return pickFresh(pool && pool.length ? () => pick(pool) : generateAuto, min);
 }
 
 // Vide la mémoire anti-répétition (tests, changement de pool).

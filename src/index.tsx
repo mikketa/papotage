@@ -124,8 +124,8 @@ function encodeSettings() {
 }
 
 // --- Icône cadenas ----------------------------------------------------------
-// Vencord exige un IconComponent en 3e argument de addChatBarButton : il sert à
-// représenter le bouton dans l'écran de réglages, où il est dimensionné par
+// Vencord exige un IconComponent en 3e argument de addChatBarButton, pour
+// représenter le bouton dans l'écran de réglages où il est dimensionné par
 // l'appelant. D'où les props height/width/className, à ne pas ignorer.
 function LockIcon({ on, height = 24, width = 24, className }: {
     on: boolean; height?: number | string; width?: number | string; className?: string;
@@ -178,6 +178,7 @@ const PapotageButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
 // --- Déchiffrement ----------------------------------------------------------
 const inFlight = new Set<string>();  // déchiffrements simultanés (anti-doublon)
 const seen = new SeenCache();        // messageId -> contenu déjà traité (borné, évincé)
+const ledger = new SendLedger();     // envois en attente de retour par Discord
 let lastPass = "";                   // si le mot de passe change, on réessaie tout
 
 // Messages dont on a remplacé le contenu affiché par le clair. Volontairement
@@ -185,11 +186,6 @@ let lastPass = "";                   // si le mot de passe change, on réessaie 
 // ici, c'est perdre la protection à l'édition sur un message dont le store
 // contient le secret en clair. Ce ne sont que des identifiants.
 const decrypted = new Set<string>();
-
-// Messages chiffrés qu'on vient d'envoyer, en attente de retour par Discord.
-// C'est la seule façon de savoir si Discord préserve vraiment nos caractères
-// invisibles : on le mesure au lieu de le supposer.
-const ledger = new SendLedger();
 
 function passphraseChanged(pass: string) {
     if (pass === lastPass) return;
@@ -232,12 +228,15 @@ async function tryDecrypt(channelId: string, messageId: string, content: string)
 const decryptLater = (channelId: string, messageId: string, content: string) =>
     void tryDecrypt(channelId, messageId, content).catch(() => { });
 
+const decryptAll = (channelId: string, msgs: any[]) => {
+    for (const m of msgs) if (m?.content) decryptLater(channelId, m.id, m.content);
+};
+
 function scanChannel(channelId?: string) {
     if (!channelId) return;
     try {
         const store: any = MessageStore.getMessages(channelId);
-        const arr: any[] = store?.toArray?.() ?? store?._array ?? (Array.isArray(store) ? store : []);
-        for (const m of arr) if (m?.content) decryptLater(channelId, m.id, m.content);
+        decryptAll(channelId, store?.toArray?.() ?? store?._array ?? (Array.isArray(store) ? store : []));
     } catch { /* ignore */ }
 }
 
@@ -276,12 +275,17 @@ const onSelect = (e: any) => {
 // quadratique. Repli sur un scan complet si le payload ne porte pas les messages.
 const onLoad = (e: any) => {
     if (!e?.channelId) return;
-    const msgs = e?.messages;
-    if (Array.isArray(msgs) && msgs.length) {
-        for (const m of msgs) if (m?.content) decryptLater(e.channelId, m.id, m.content);
-    } else {
-        scanChannel(e.channelId);
-    }
+    if (Array.isArray(e.messages) && e.messages.length) decryptAll(e.channelId, e.messages);
+    else scanChannel(e.channelId);
+};
+
+// Déclarés en table : un abonnement sans désabonnement correspondant serait une
+// fuite silencieuse au `stop()`.
+const FLUX_HANDLERS: Record<string, (e: any) => void> = {
+    MESSAGE_CREATE: onCreate,
+    MESSAGE_UPDATE: onUpdate,
+    CHANNEL_SELECT: onSelect,
+    LOAD_MESSAGES_SUCCESS: onLoad
 };
 
 let preSend: any;
@@ -340,10 +344,9 @@ export default definePlugin({
 
         addChatBarButton("papotage", PapotageButton, props => <LockIcon on={false} {...props} />);
 
-        FluxDispatcher.subscribe("MESSAGE_CREATE", onCreate);
-        FluxDispatcher.subscribe("MESSAGE_UPDATE", onUpdate);
-        FluxDispatcher.subscribe("CHANNEL_SELECT", onSelect);
-        FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onLoad);
+        for (const [event, handler] of Object.entries(FLUX_HANDLERS)) {
+            FluxDispatcher.subscribe(event, handler);
+        }
 
         // déchiffrer l'historique déjà affiché (ex. après un Ctrl+R, salon déjà ouvert)
         scanCurrent();
@@ -356,10 +359,9 @@ export default definePlugin({
         removeChatBarButton("papotage");
         scanTimers.forEach(clearTimeout);
         scanTimers = [];
-        FluxDispatcher.unsubscribe("MESSAGE_CREATE", onCreate);
-        FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onUpdate);
-        FluxDispatcher.unsubscribe("CHANNEL_SELECT", onSelect);
-        FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onLoad);
+        for (const [event, handler] of Object.entries(FLUX_HANDLERS)) {
+            FluxDispatcher.unsubscribe(event, handler);
+        }
         seen.clear();
         decrypted.clear();
         forgetKeys(); // ne pas laisser traîner les clés dérivées après un stop

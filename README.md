@@ -114,12 +114,12 @@ npm run audit   # cherche les régularités exploitables dans les messages produ
 npm run bench   # mesures de performance
 ```
 
-115 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
+116 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
 salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), les
 règles d'envoi du plugin, les propriétés de discrétion (absence de marqueur fixe,
-dispersion du payload, intégrité des emojis de couverture, variété des phrases) et la
-détection d'un message altéré par Discord et le respect de la règle de dépendance
-entre modules.
+dispersion du payload, intégrité des emojis de couverture, variété des phrases), la
+détection d'un message altéré par Discord, l'équivalence des chemins rapides avec une
+implémentation naïve, et le respect de la règle de dépendance entre modules.
 
 Les tests qui portent sur des grandeurs aléatoires (dispersion, variété des
 couvertures) affirment des statistiques d'échantillon avec des seuils tirés de
@@ -129,7 +129,10 @@ mesures, pas des tirages uniques : la suite est passée de 2 échecs sur 120 à 
 Les chemins chauds sont mesurés, pas devinés (`npm run bench`). Le pré-filtre tourne
 sur chaque message de chaque scan de salon : il rejette un message ordinaire en
 **0,1 µs** contre 57 µs auparavant, et scanner un salon de 500 messages est passé de
-550 µs à 49 µs.
+550 µs à une cinquantaine. Le même court-circuit sert désormais à extraire le texte
+visible d'un message — appelé sur chaque envoi et sur chacun de nos messages que
+Discord nous renvoie —, ce qui le fait passer de 7 µs à 0,07 µs sur un message
+ordinaire.
 
 Les API Vencord utilisées (`addChatBarButton`, `addMessagePreSendListener`,
 `addMessagePreEditListener`, `updateMessage`, `OptionType.SELECT`, `Toasts`,
@@ -155,7 +158,7 @@ dépendances déclarées, un import Vencord ailleurs que dans le câblage, une c
 court-circuitée, un cycle — et un fichier ajouté dans `src/` qui ne serait déclaré
 nulle part.
 
-- `src/envelope.mjs` — la partie sensible, isolée pour être relisible seule (224 lignes)
+- `src/envelope.mjs` — la partie sensible, isolée pour être relisible seule (~200 lignes)
 - `src/codec.mjs` — encodages et dispersion ; ne chiffre rien, ne choisit pas la couverture
 - `src/covers.mjs` — génération des phrases de couverture
 - `src/random.mjs` — tirage aléatoire uniforme partagé
