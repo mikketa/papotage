@@ -8,7 +8,8 @@
     },
     "scripts": {
         "test": "node --test",
-        "bench": "node bench/bench.mjs"
+        "bench": "node bench/bench.mjs",
+        "audit": "node bench/stego-audit.mjs"
     },
     "author": "zefarie",
     "license": "MIT",

@@ -41,10 +41,18 @@ test("message normal => null", async () => {
 });
 
 test("compact est ~2,7x plus court que l'invisible dense", async () => {
+    // Rapport théorique : 8/3 = 2,67 caractères par octet contre 1. Comparer
+    // DEUX tirages uniques ne marche plus depuis que le remplissage comporte un
+    // jitter aléatoire, tiré indépendamment pour chacun : le rapport observé
+    // fluctuait assez pour faire échouer le test une fois sur quatre. On compare
+    // donc des moyennes, où le jitter se compense.
     const clair = incompressible(300);
-    const dense = invisibleCount(await encodeHidden(clair, PASS, { cover: "ok", bits: 3, context: CTX }));
-    const compact = invisibleCount(await encodeCompact(clair, PASS, { cover: "ok", context: CTX }));
-    assert.ok(compact * 2.5 < dense, `compact=${compact}, dense=${dense}`);
+    let dense = 0, compact = 0;
+    for (let i = 0; i < 20; i++) {
+        dense += invisibleCount(await encodeHidden(clair, PASS, { cover: "ok", bits: 3, context: CTX }));
+        compact += invisibleCount(await encodeCompact(clair, PASS, { cover: "ok", context: CTX }));
+    }
+    assert.ok(dense / compact > 2.4, `rapport observé ${(dense / compact).toFixed(2)}`);
 });
 
 test("un très long message tient dans un seul message Discord", async () => {

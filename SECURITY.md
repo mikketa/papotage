@@ -80,6 +80,18 @@ contenu. Ce sont deux problèmes distincts, et le second est le plus faible des 
   messages). Or un message Discord ordinaire ne commence jamais par un caractère
   invisible : `/^[\u200B-\u2064]/` suffisait à trier. Le payload commence maintenant
   après le premier caractère visible, mesuré 0 sur 500.
+- *La fin invisible.* Symétrique du défaut précédent, et resté en place une
+  version de plus : 91,5 % des messages se terminaient par un caractère
+  invisible. Le payload se place désormais strictement ENTRE le premier et le
+  dernier caractère visible — mesuré 0 sur 600.
+- *L'octet de repère du mode compact.* La trame s'ouvrait par un octet MAGIC
+  constant : le premier sélecteur de variation du message valait toujours la même
+  valeur, 100 % sur 600. Supprimé. Le décodeur ne cherche plus le départ, il le
+  **calcule** : la trame vaut 28 octets d'en-tête plus un multiple de 16, donc un
+  seul décalage est arithmétiquement possible.
+- *La taille déterministe.* Un secret donné produisait toujours exactement la
+  même longueur : deux envois du même texte se reconnaissaient sans rien lire. Le
+  remplissage ajoute maintenant 0 à 2 blocs tirés au hasard.
 - *La répétition des couvertures.* Un pool de 15 phrases tirées uniformément
   reproduisait la même phrase au bout de quelques messages : le motif le plus facile
   à remarquer, et il n'exige aucun outil, juste un humain qui lit le salon. Les
@@ -181,6 +193,17 @@ qu'un humain tape, un faux positif est hors d'atteinte.
 
 Le marqueur est un ajout d'affichage : il est retiré si l'auteur édite le message, il
 ne part jamais dans le salon.
+
+## L'audit, écrit pour nous-mêmes
+
+Aucune des signatures ci-dessus n'a été trouvée en relisant le code : toutes sont
+sorties d'une mesure. `npm run audit` systématise la démarche — il produit 600
+messages par mode et y cherche ce qu'un détecteur chercherait : une valeur
+constante, une position privilégiée (début, fin), une distribution non uniforme,
+un ensemble restreint de longueurs. Chaque ligne « ALERTE » est un défaut.
+
+Il tourne en intégration continue. Une refonte qui réintroduirait l'une de ces
+régularités casse la construction au lieu de passer inaperçue.
 
 ## Signaler un problème
 

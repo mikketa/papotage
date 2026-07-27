@@ -17,9 +17,10 @@ invisible. Sans le plugin, un message ressemble à une réponse quelconque
 4. Chaque message envoyé est comparé à celui que Discord renvoie. S'il a été modifié
    en route, l'expéditeur est prévenu tout de suite : le destinataire ne pourra pas
    le lire.
-5. Un message chiffré qu'on ne sait **pas** lire (mauvais mot de passe, autre salon,
-   autre version) est préfixé d'un 🔒. Sans ça, on ne verrait que la phrase de
-   couverture et on ignorerait qu'un message nous a échappé.
+
+Un message chiffré qu'on ne sait **pas** lire n'est signalé par rien : un marqueur à
+l'écran trahirait l'utilisateur devant un témoin ou un partage d'écran. Le silence
+fait partie de la couverture.
 
 Le chiffrement s'active salon par salon avec le cadenas de la barre de message
 (gris = off, vert = on, orange = armé mais sans mot de passe).
@@ -45,7 +46,6 @@ Le chiffrement s'active salon par salon avec le cadenas de la barre de message
 | Encodage | Mode d'encodage du secret (voir ci-dessous) |
 | Auto Decrypt | Déchiffrer automatiquement les messages reçus |
 | Show 🔓 | Préfixer les messages déchiffrés pour les repérer |
-| Mark Unreadable | Préfixer d'un 🔒 les messages chiffrés qu'on ne peut PAS lire |
 | Custom Cover | Phrase de couverture par défaut |
 | Cover Pool | Tes propres phrases de couverture, une par ligne (le pool intégré est public) |
 | Length Hiding | Rembourre par paliers au lieu de blocs de 16 o : masque la longueur, coûte de la place |
@@ -76,9 +76,10 @@ exact : le message n'est jamais avalé silencieusement par Discord.
 - **Détectabilité** : invisible à la lecture. Un scan qui *compte* les caractères
   invisibles d'un message les trouvera toujours — c'est une limite de fond, pas un
   réglage. Ce qui a été supprimé, ce sont les signatures faciles : plus de marqueur
-  fixe annonçant le payload, et plus de traînée d'un seul tenant (sur un secret de
-  200 caractères, la plus longue série contiguë passe de 588 symboles à 90). La
-  longueur du message reste corrélée à celle du secret, sauf en mode paliers.
+  fixe, plus de traînée d'un seul tenant, et le payload ne touche ni le début ni la
+  fin du message. La longueur reste corrélée à celle du secret — brouillée par un
+  remplissage aléatoire, et bien davantage en mode paliers. `npm run audit` vérifie
+  tout ça sur 600 messages par mode, et tourne en intégration continue.
 - **Confiance dans le client** : le texte est en clair dans le client au moment où on
   le tape, et le mot de passe est stocké en clair dans les réglages Vencord
   (`settings.json`).
@@ -108,10 +109,11 @@ se teste en local :
 
 ```bash
 npm test        # Node >= 20
+npm run audit   # cherche les régularités exploitables dans les messages produits
 npm run bench   # mesures de performance
 ```
 
-109 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
+110 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
 salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), les
 règles d'envoi du plugin, les propriétés de discrétion (absence de marqueur fixe,
 dispersion du payload, intégrité des emojis de couverture, variété des phrases) et la
@@ -120,7 +122,7 @@ détection d'un message altéré par Discord.
 Les tests qui portent sur des grandeurs aléatoires (dispersion, variété des
 couvertures) affirment des statistiques d'échantillon avec des seuils tirés de
 mesures, pas des tirages uniques : la suite est passée de 2 échecs sur 120 à 0 sur
-200 exécutions.
+45 exécutions complètes.
 
 Les chemins chauds sont mesurés, pas devinés (`npm run bench`). Le pré-filtre tourne
 sur chaque message de chaque scan de salon : il rejette un message ordinaire en
@@ -140,7 +142,7 @@ CI compile `index.tsx` avec esbuild à chaque changement.
 - `src/plugin-core.mjs` — règles d'envoi et de réception, sans dépendance Vencord
 - `src/index.tsx` — câblage Vencord (bouton, événements, toasts)
 - `test/` — suite de tests (`node:test`)
-- `bench/` — mesures de performance
+- `bench/` — mesures de performance et audit stéganographique
 
 ## Licence
 

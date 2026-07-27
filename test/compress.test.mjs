@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeHidden, encodeHidden, wireSize } from "../src/codec.mjs";
+import { decodeHidden, encodeHidden, wireSize, wireSizeMax } from "../src/codec.mjs";
 import { CTX, PASS, incompressible, invisibleCount } from "./helpers.mjs";
 
 // Message long et redondant, typique d'un vrai échange.
@@ -18,7 +18,7 @@ test("aller-retour d'un long message compressible", async () => {
 
 test("la compression réduit vraiment la taille envoyée", async () => {
     const octets = new TextEncoder().encode(LONG).length;
-    const sans = Math.ceil(wireSize(octets) * 8 / 3); // sans compression, 3 bits/car
+    const sans = Math.ceil(wireSize(octets) * 8 / 3); // plancher sans compression, 3 bits/car
     const avec = invisibleCount(await encodeHidden(LONG, PASS, { cover: "ok", context: CTX }));
     assert.ok(avec < sans, `${avec} caractères contre ${sans} attendus sans compression`);
 });
@@ -28,7 +28,7 @@ test("un texte peu compressible n'est jamais gonflé par la compression", async 
     // que s'il est plus petit, donc on ne dépasse jamais la taille brute.
     const clair = incompressible(200);
     const octets = new TextEncoder().encode(clair).length;
-    const plafond = Math.ceil(wireSize(octets) * 8 / 3) + 1; // +1 : en-tête de densité
+    const plafond = Math.ceil(wireSizeMax(octets) * 8 / 3);
     const msg = await encodeHidden(clair, PASS, { cover: "ok", context: CTX });
     assert.ok(invisibleCount(msg) <= plafond, `${invisibleCount(msg)} > ${plafond}`);
     assert.equal(await decodeHidden(msg, PASS, { context: CTX }), clair);

@@ -21,6 +21,9 @@ jobs:
       - name: Tests (chiffrement, stéganographie, logique du plugin)
         run: npm test
 
+      - name: Audit stéganographique (régularités exploitables)
+        run: npm run audit
+
   syntax:
     # Le plugin lui-même n'est compilable que dans l'arbre Vencord ; on vérifie
     # au moins qu'il ne part pas en production avec une erreur de syntaxe.

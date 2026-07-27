@@ -16,7 +16,6 @@ import {
     encodeOutgoing,
     isPapotageMessage,
     resolveSeparator,
-    SEALED_PREFIX,
     stripMarkers
 } from "../src/plugin-core.mjs";
 import { EMOJI, scanSymbols, visibleText } from "../src/codec.mjs";
@@ -177,7 +176,6 @@ test("les marqueurs d'affichage sont retirés avant de re-chiffrer", async () =>
     // 🔓 (déchiffré) comme 🔒 (illisible) sont des ajouts d'affichage : aucun
     // des deux ne doit se retrouver publié dans le salon.
     assert.equal(stripMarkers(LOCK_PREFIX + "rdv 20h"), "rdv 20h");
-    assert.equal(stripMarkers(SEALED_PREFIX + "ok ça marche"), "ok ça marche");
     assert.equal(stripMarkers("rdv 20h"), "rdv 20h");
     assert.equal(stripMarkers("🔓rdv"), "🔓rdv"); // sans l'espace, ce n'est pas le marqueur
 });
@@ -308,9 +306,9 @@ function scanReference(message) {
 
 // --- Message chiffré mais illisible -----------------------------------------
 
-test("un message chiffré avec une autre clé reste reconnu comme chiffré", async () => {
-    // C'est ce qui permet de le marquer 🔒 : sans ça, l'utilisateur ne voit que
-    // la phrase de couverture et ignore qu'un message lui a échappé.
+test("un message chiffré avec une autre clé ne laisse aucune trace visible", async () => {
+    // Choix délibéré : rien ne signale un message qu'on ne sait pas lire. Un
+    // marqueur à l'écran trahirait l'utilisateur devant un témoin.
     for (const mode of Object.values(MODE)) {
         const content = await encodeOutgoing({ ...base, raw: "message manqué", mode });
         assert.equal(await decodeIncoming({ content, passphrase: "autre-mot-de-passe", context: CTX }), null);
@@ -324,8 +322,8 @@ test("un message d'un autre salon est reconnu comme chiffré mais illisible", as
     assert.ok(isPapotageMessage(content));
 });
 
-test("un message ordinaire n'est jamais marqué comme illisible", async () => {
-    // Le marqueur 🔒 modifie l'affichage : un faux positif serait très visible.
+test("un message ordinaire n'est jamais pris pour un message chiffré", async () => {
+    // Un faux positif ici ferait sauter le chiffrement à l'envoi.
     for (const content of ["salut ça va ?", "👍", "regarde ❤️ c'est mignon", "ok ça marche 👍"]) {
         assert.equal(isPapotageMessage(content), false, `faux positif sur ${JSON.stringify(content)}`);
     }

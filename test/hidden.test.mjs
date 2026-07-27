@@ -49,11 +49,17 @@ test("la densité est auto-détectée à la réception", async () => {
 });
 
 test("3 bits envoie ~33 % de caractères invisibles en moins que 2 bits", async () => {
+    // Le remplissage comporte un jitter aléatoire, tiré indépendamment pour
+    // chaque message : comparer deux tirages uniques faisait échouer ce test une
+    // fois sur six. On compare des moyennes, où le jitter se compense.
     const clair = "rendez-vous ce soir même endroit, ramène le matériel et préviens les autres";
-    const inv2 = invisibleCount(await encodeHidden(clair, PASS, { cover: "ok", bits: 2, context: CTX }));
-    const inv3 = invisibleCount(await encodeHidden(clair, PASS, { cover: "ok", bits: 3, context: CTX }));
+    let inv2 = 0, inv3 = 0;
+    for (let i = 0; i < 20; i++) {
+        inv2 += invisibleCount(await encodeHidden(clair, PASS, { cover: "ok", bits: 2, context: CTX }));
+        inv3 += invisibleCount(await encodeHidden(clair, PASS, { cover: "ok", bits: 3, context: CTX }));
+    }
     const gain = Math.round((1 - inv3 / inv2) * 100);
-    assert.ok(gain >= 25, `gain trop faible : ${gain} %`);
+    assert.ok(gain >= 25, `gain moyen trop faible : ${gain} %`);
 });
 
 test("du texte ajouté après le payload ne casse pas le décodage", async () => {
