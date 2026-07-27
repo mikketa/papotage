@@ -24,7 +24,8 @@ export const MODE = {
 };
 
 export const DEFAULT_SEPARATOR = " | ";
-export const LOCK_PREFIX = "🔓 ";
+export const LOCK_PREFIX = "🔓 ";   // message déchiffré, lisible
+export const SEALED_PREFIX = "🔒 "; // message chiffré qu'on ne sait PAS lire
 export const MAX_MESSAGE_CHARS = 2000; // limite Discord
 
 // Un séparateur vide ou fait uniquement d'espaces découperait tous les messages
@@ -165,10 +166,14 @@ export async function decodeIncoming({ content, passphrase, context = "" }) {
     }
 }
 
-// Retire le préfixe ajouté à l'affichage, pour récupérer le clair d'origine
-// (nécessaire avant de re-chiffrer un message qu'on édite).
-export function stripLockPrefix(content) {
-    return content.startsWith(LOCK_PREFIX) ? content.slice(LOCK_PREFIX.length) : content;
+// Retire le marqueur ajouté à l'affichage, pour récupérer le contenu d'origine.
+// Nécessaire avant de re-chiffrer un message qu'on édite, et avant de renvoyer
+// un message qu'on avait seulement marqué comme illisible.
+export function stripMarkers(content) {
+    for (const p of [LOCK_PREFIX, SEALED_PREFIX]) {
+        if (content.startsWith(p)) return content.slice(p.length);
+    }
+    return content;
 }
 
 // ===========================================================================

@@ -2,8 +2,9 @@
 // Fonctionne dans Node (>=20) et dans le navigateur : utilise globalThis.crypto.
 //
 // ===========================================================================
-// Format v3 (incompatible v1 et v2 : la séparation est assurée par le domaine
-// de dérivation, un message d'une autre version se décode en null).
+// Format v4 (incompatible avec les versions antérieures : la séparation est
+// assurée par le domaine de dérivation, un message d'une autre version se
+// décode en null).
 // ===========================================================================
 //
 //   clair ──▶ [flags(1)] ──▶ deflate? ──▶ padding ──▶ AES-GCM ──▶ octets
@@ -16,7 +17,7 @@
 // complet de 128 bits, sel PBKDF2 dérivé du salon, drapeau de compression
 // placé DANS le clair chiffré pour ne pas fuiter la compressibilité.
 //
-// Ce que v3 change, côté DISSIMULATION :
+// Ce que v3 et v4 ont changé, côté DISSIMULATION :
 //   - plus de marqueur fixe. v2 annonçait le payload par un U+2060 : une
 //     constante publique, donc la signature parfaite pour un détecteur ("le
 //     premier word-joiner suivi de caractères invisibles"). Le décodeur
@@ -27,6 +28,15 @@
 //     régulières de détection.
 //   - padding par paliers en option, pour que la longueur du message ne suive
 //     plus la longueur du secret.
+//   - plus d'en-tête de densité (v4). v3 le plaçait en premier symbole du
+//     payload : c'était une constante, donc le premier caractère invisible de
+//     tout message valait ZW[1] en 3 bits et ZW[0] en 2 bits — mesuré 400 fois
+//     sur 400. Le marqueur avait changé de place, pas disparu. La densité se
+//     déduit maintenant des symboles eux-mêmes.
+//   - le message commence toujours par du texte visible (v4). En v3 la
+//     dispersion pouvait poser des symboles avant le premier caractère de la
+//     couverture, et le faisait dans 90 % des cas (mesuré) : un message Discord
+//     ordinaire ne commence jamais par un caractère invisible.
 //
 // À dire clairement : rien de tout cela ne rend le canal indétectable. Un
 // scanner qui COMPTE les caractères invisibles d'un message les trouvera
@@ -40,7 +50,7 @@ import { randomInts } from "./random.mjs";
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
-const DOMAIN = "papotage-v3";  // sépare les versions de protocole ET les contextes
+const DOMAIN = "papotage-v4";  // sépare les versions de protocole ET les contextes
 const ITER = 600_000;          // PBKDF2 aligné OWASP ; coût amorti par le cache de clé
 const NONCE_LEN = 12;          // = taille d'IV native de GCM, aucun remplissage
 const TAG_BITS = 128;          // tag complet : pas de troncature, pas de limite d'invocations
@@ -397,7 +407,7 @@ export async function encodeHidden(text, passphrase, { cover, bits = 3, context 
     if (bits !== 2 && bits !== 3) bits = 3;
     const bytes = await encryptBytes(text, passphrase, context, padding);
     const mask = (1 << bits) - 1;
-    const syms = [ZW_ALL[bits - 2]]; // en-tête densité, premier symbole émis
+    const syms = []; // aucun en-tête : ce serait une constante en tête de payload
     let acc = 0, accBits = 0;
     for (const byte of bytes) {
         acc = (acc << 8) | byte;
@@ -408,39 +418,59 @@ export async function encodeHidden(text, passphrase, { cover, bits = 3, context 
         }
     }
     if (accBits > 0) syms.push(ZW_ALL[(acc << (bits - accBits)) & mask]); // bits de fin
-    return scatter(stripHidden(coverFor(cover, pool)), syms);
+    // Pas de position de tête : sinon 90 % des messages commençaient par un
+    // caractère invisible (mesuré), ce qu'un message Discord ordinaire ne fait
+    // jamais. C'est le même défaut que l'en-tête de densité — une régularité
+    // qui suffit à trier, sans rien décoder.
+    return scatter(stripHidden(coverFor(cover, pool)), syms, { allowLeading: false });
 }
 
-// Renvoie le texte clair, ou null si pas de payload / mauvaise clé / mauvais
-// contexte. Les symboles sont ramassés dans l'ordre du texte, où qu'ils soient :
-// aucun marqueur de début n'est nécessaire, et du texte ajouté après coup
-// (message édité, signature de bot) ne gêne pas.
-export async function decodeHidden(message, passphrase, { context = "" } = {}) {
-    const syms = [];
-    for (const ch of message) {
-        const v = ZW_VAL.get(ch);
-        if (v !== undefined) syms.push(v);
-    }
-    if (syms.length < 2 || syms[0] > 1) return null; // densité inconnue
-    const bits = syms[0] + 2;
+// Dépaquette un flux de symboles en octets pour une densité donnée.
+// Renvoie null si un symbole sort de l'alphabet annoncé.
+function unpackBits(syms, bits) {
     const alpha = 1 << bits;
     let acc = 0, accBits = 0;
     const bytes = [];
-    for (let i = 1; i < syms.length; i++) {
-        if (syms[i] >= alpha) return null; // symbole hors densité annoncée
-        acc = (acc << bits) | syms[i];
+    for (const v of syms) {
+        if (v >= alpha) return null;
+        acc = (acc << bits) | v;
         accBits += bits;
         if (accBits >= 8) {
             accBits -= 8;
             bytes.push((acc >> accBits) & 0xff);
         }
     }
-    if (bytes.length === 0) return null; // les bits restants (< 8) sont du padding
-    try {
-        return await decryptBytes(new Uint8Array(bytes), passphrase, context);
-    } catch {
-        return null;
+    return bytes.length ? new Uint8Array(bytes) : null; // bits restants = padding
+}
+
+// Renvoie le texte clair, ou null si pas de payload / mauvaise clé / mauvais
+// contexte. Les symboles sont ramassés dans l'ordre du texte, où qu'ils soient :
+// aucun marqueur de début n'est nécessaire, et du texte ajouté après coup
+// (message édité, signature de bot) ne gêne pas.
+//
+// La densité n'est plus annoncée, elle se déduit : un symbole >= 4 ne peut venir
+// que de l'alphabet 3 bits. Un payload 3 bits fait au moins 118 symboles tirés
+// uniformément sur 8 valeurs, donc la probabilité qu'aucun n'atteigne 4 est de
+// 2^-118 — en pratique une seule densité est jamais essayée.
+export async function decodeHidden(message, passphrase, { context = "" } = {}) {
+    const syms = [];
+    let max = 0;
+    for (const ch of message) {
+        const v = ZW_VAL.get(ch);
+        if (v !== undefined) {
+            syms.push(v);
+            if (v > max) max = v;
+        }
     }
+    if (syms.length < 8) return null;
+    for (const bits of max >= 4 ? [3] : [2, 3]) {
+        const bytes = unpackBits(syms, bits);
+        if (!bytes) continue;
+        try {
+            return await decryptBytes(bytes, passphrase, context);
+        } catch { /* densité suivante */ }
+    }
+    return null;
 }
 
 // ===========================================================================

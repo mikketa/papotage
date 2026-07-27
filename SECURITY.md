@@ -44,13 +44,13 @@ serve en croyant avoir mieux.
 | Élément | Valeur | Pourquoi |
 |---|---|---|
 | Dérivation | PBKDF2-SHA256, 600 000 itérations | Aligné sur les recommandations OWASP. Coût amorti par un cache de clé. |
-| Sel | `SHA-256("papotage-v3\|<salon>")` | Pas de sel constant partagé par tous les utilisateurs, donc pas de précalcul unique qui casserait tout le monde. Sépare aussi les salons entre eux. |
+| Sel | `SHA-256("papotage-v4\|<salon>")` | Pas de sel constant partagé par tous les utilisateurs, donc pas de précalcul unique qui casserait tout le monde. Sépare aussi les salons entre eux. |
 | Chiffrement | AES-GCM 256 | Chiffrement authentifié : une trame modifiée est rejetée, pas déchiffrée de travers. |
 | Nonce | 12 octets aléatoires | Taille native de GCM. Une collision de nonce sur une clé fixe ne fuite pas seulement le XOR des clairs, elle expose la clé d'authentification GHASH. |
 | Tag | 128 bits (complet) | Pas de troncature : pas de limite d'invocations à surveiller, pas de récupération accélérée de GHASH. |
 | Compression | deflate-raw, avant chiffrement | Le drapeau voyage **dans** le clair chiffré : la compressibilité du message ne fuite pas. |
 | Padding | ISO/IEC 7816-4, blocs de 16 octets, paliers en option | Découple la longueur envoyée de la longueur exacte du secret. |
-| Domaine | `papotage-v3` | Sépare les versions de protocole : un message d'une autre version échoue au tag, il n'est jamais interprété de travers. |
+| Domaine | `papotage-v4` | Sépare les versions de protocole : un message d'une autre version échoue au tag, il n'est jamais interprété de travers. |
 
 ## Dissimulation
 
@@ -70,6 +70,16 @@ contenu. Ce sont deux problèmes distincts, et le second est le plus faible des 
   dans les intervalles de la couverture, avec des tailles de paquets tirées au sort.
   Sur un secret de 200 caractères, la plus longue série contiguë passe de 588
   symboles à environ 90, et la découpe diffère à chaque envoi du même texte.
+- *L'en-tête de densité.* v3 ouvrait le payload par un symbole constant annonçant
+  2 ou 3 bits. Résultat mesuré : le premier caractère invisible de **tout** message
+  valait `ZW[1]` en 3 bits, 400 fois sur 400. Le marqueur avait changé de place, pas
+  disparu. La densité se déduit désormais des symboles eux-mêmes — un symbole ≥ 4 ne
+  peut venir que de l'alphabet 3 bits — et le premier symbole balaie tout l'alphabet.
+- *Le début invisible.* La dispersion pouvait poser des symboles **avant** le premier
+  caractère de la couverture, et le faisait dans 90 % des cas (mesuré sur 500
+  messages). Or un message Discord ordinaire ne commence jamais par un caractère
+  invisible : `/^[\u200B-\u2064]/` suffisait à trier. Le payload commence maintenant
+  après le premier caractère visible, mesuré 0 sur 500.
 - *La répétition des couvertures.* Un pool de 15 phrases tirées uniformément
   reproduisait la même phrase au bout de quelques messages : le motif le plus facile
   à remarquer, et il n'exige aucun outil, juste un humain qui lit le salon. Les
@@ -160,6 +170,17 @@ utilisé. Une dérivation coûte **104 ms de CPU** (mesuré) : sans borne, parco
 salons en dérivait cent et les gardait toutes en mémoire jusqu'au rechargement de
 Discord. La pré-dérivation à l'ouverture d'un salon ne se déclenche plus que là où le
 chiffrement est effectivement armé ; ailleurs la clé est dérivée à la demande.
+
+## Messages illisibles
+
+Un message chiffré qu'on ne sait pas lire — mauvais mot de passe, autre salon, autre
+version du format — est signalé par un 🔒 devant la phrase de couverture. Sans ce
+marqueur, l'échec est parfaitement silencieux : on voit une réponse anodine et on
+ignore qu'un message nous a échappé. Le seuil de détection étant très au-dessus de ce
+qu'un humain tape, un faux positif est hors d'atteinte.
+
+Le marqueur est un ajout d'affichage : il est retiré si l'auteur édite le message, il
+ne part jamais dans le salon.
 
 ## Signaler un problème
 

@@ -16,7 +16,8 @@ import {
     encodeOutgoing,
     isPapotageMessage,
     resolveSeparator,
-    stripLockPrefix
+    SEALED_PREFIX,
+    stripMarkers
 } from "../src/plugin-core.mjs";
 import { EMOJI, scanSymbols, visibleText } from "../src/codec.mjs";
 import { CTX, OTHER_CTX, PASS, incompressible, visible } from "./helpers.mjs";
@@ -172,9 +173,13 @@ test("sans mot de passe, la réception ne tente rien", async () => {
 
 // --- Protection de l'édition ------------------------------------------------
 
-test("le préfixe cadenas est retiré avant de re-chiffrer", async () => {
-    assert.equal(stripLockPrefix(LOCK_PREFIX + "rdv 20h"), "rdv 20h");
-    assert.equal(stripLockPrefix("rdv 20h"), "rdv 20h");
+test("les marqueurs d'affichage sont retirés avant de re-chiffrer", async () => {
+    // 🔓 (déchiffré) comme 🔒 (illisible) sont des ajouts d'affichage : aucun
+    // des deux ne doit se retrouver publié dans le salon.
+    assert.equal(stripMarkers(LOCK_PREFIX + "rdv 20h"), "rdv 20h");
+    assert.equal(stripMarkers(SEALED_PREFIX + "ok ça marche"), "ok ça marche");
+    assert.equal(stripMarkers("rdv 20h"), "rdv 20h");
+    assert.equal(stripMarkers("🔓rdv"), "🔓rdv"); // sans l'espace, ce n'est pas le marqueur
 });
 
 test("ré-encoder un message déchiffré redonne le même clair", async () => {
@@ -182,7 +187,7 @@ test("ré-encoder un message déchiffré redonne le même clair", async () => {
     const clair = "le vrai contenu";
     const content = await encodeOutgoing({ ...base, raw: clair });
     const affiche = LOCK_PREFIX + await decodeIncoming({ content, ...base });
-    const reencode = await encodeOutgoing({ ...base, raw: stripLockPrefix(affiche) });
+    const reencode = await encodeOutgoing({ ...base, raw: stripMarkers(affiche) });
     assert.ok(!reencode.includes(clair));
     assert.equal(await decodeIncoming({ content: reencode, ...base }), clair);
 });
@@ -300,3 +305,28 @@ function scanReference(message) {
     }
     return { hidden, compact, emojiRun: best };
 }
+
+// --- Message chiffré mais illisible -----------------------------------------
+
+test("un message chiffré avec une autre clé reste reconnu comme chiffré", async () => {
+    // C'est ce qui permet de le marquer 🔒 : sans ça, l'utilisateur ne voit que
+    // la phrase de couverture et ignore qu'un message lui a échappé.
+    for (const mode of Object.values(MODE)) {
+        const content = await encodeOutgoing({ ...base, raw: "message manqué", mode });
+        assert.equal(await decodeIncoming({ content, passphrase: "autre-mot-de-passe", context: CTX }), null);
+        assert.ok(isPapotageMessage(content), `mode ${mode} : payload non reconnu`);
+    }
+});
+
+test("un message d'un autre salon est reconnu comme chiffré mais illisible", async () => {
+    const content = await encodeOutgoing({ ...base, raw: "secret" });
+    assert.equal(await decodeIncoming({ content, passphrase: PASS, context: OTHER_CTX }), null);
+    assert.ok(isPapotageMessage(content));
+});
+
+test("un message ordinaire n'est jamais marqué comme illisible", async () => {
+    // Le marqueur 🔒 modifie l'affichage : un faux positif serait très visible.
+    for (const content of ["salut ça va ?", "👍", "regarde ❤️ c'est mignon", "ok ça marche 👍"]) {
+        assert.equal(isPapotageMessage(content), false, `faux positif sur ${JSON.stringify(content)}`);
+    }
+});

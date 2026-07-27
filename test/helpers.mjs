@@ -61,3 +61,9 @@ export function isSubsequence(needle, hay) {
     for (const ch of hay) if (i < want.length && ch === want[i]) i++;
     return i === want.length;
 }
+
+// L'alphabet zero-width, dupliqué ici volontairement : un test qui importerait
+// la constante du code testé ne verrait pas une modification de cet alphabet.
+export const ZW_SYMBOLS = [
+    "\u200b", "\u200c", "\u200d", "\u2060", "\u2061", "\u2062", "\u2063", "\u2064"
+];

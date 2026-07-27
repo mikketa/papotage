@@ -29,9 +29,11 @@ import {
     MODE,
     PADDING,
     PapotageError,
+    SEALED_PREFIX,
     SeenCache,
     SendLedger,
-    stripLockPrefix
+    detectMode,
+    stripMarkers
 } from "./plugin-core.mjs";
 
 const settings = definePluginSettings({
@@ -66,6 +68,12 @@ const settings = definePluginSettings({
     showLock: {
         type: OptionType.BOOLEAN,
         description: "Afficher un 🔓 devant les messages déchiffrés (pour les distinguer)",
+        default: true
+    },
+    markUnreadable: {
+        type: OptionType.BOOLEAN,
+        description: "Afficher un 🔒 devant les messages chiffrés qu'on ne peut PAS lire "
+            + "(mauvais mot de passe, autre version) — sinon on ne saurait jamais qu'ils existent",
         default: true
     },
     customCover: {
@@ -177,6 +185,10 @@ let lastPass = "";                   // si le mot de passe change, on réessaie 
 // contient le secret en clair. Ce ne sont que des identifiants.
 const decrypted = new Set<string>();
 
+// Messages chiffrés qu'on n'a pas su lire et qu'on a préfixés d'un 🔒. Le
+// marqueur ne doit pas partir dans le message si leur auteur les édite.
+const unreadable = new Set<string>();
+
 // Messages chiffrés qu'on vient d'envoyer, en attente de retour par Discord.
 // C'est la seule façon de savoir si Discord préserve vraiment nos caractères
 // invisibles : on le mesure au lieu de le supposer.
@@ -185,7 +197,8 @@ const ledger = new SendLedger();
 function passphraseChanged(pass: string) {
     if (pass === lastPass) return;
     lastPass = pass;
-    seen.clear();   // retenter le déchiffrement de tout le salon avec la nouvelle clé
+    seen.clear();      // retenter le déchiffrement de tout le salon avec la nouvelle clé
+    unreadable.clear(); // les messages marqués 🔒 méritent une seconde chance
     forgetKeys();
     // `decrypted` n'est PAS vidé : les messages déjà affichés en clair le restent,
     // et leur édition doit continuer d'être interceptée.
@@ -205,7 +218,19 @@ async function tryDecrypt(channelId: string, messageId: string, content: string)
         // Le contexte = le salon : la clé diffère d'une conversation à l'autre.
         const txt = await decodeIncoming({ content, passphrase: pass, context: channelId });
         seen.set(messageId, content);
-        if (txt == null) return;
+        if (txt == null) {
+            // Un message qui porte un payload mais qu'on ne sait pas lire, c'est
+            // un message qu'on rate en silence : sans marqueur, on ne voit que
+            // la phrase de couverture et on ignore qu'il y avait autre chose.
+            if (settings.store.markUnreadable && detectMode(content)) {
+                const sealed = SEALED_PREFIX + content;
+                seen.set(messageId, sealed);
+                unreadable.add(messageId);
+                updateMessage(channelId, messageId, { content: sealed });
+            }
+            return;
+        }
+        unreadable.delete(messageId);
         const shown = settings.store.showLock ? LOCK_PREFIX + txt : txt;
         seen.set(messageId, shown); // le contenu remplacé ne repassera pas le filtre
         decrypted.add(messageId);
@@ -315,9 +340,14 @@ export default definePlugin({
             // Même raison qu'à l'envoi : une exception qui s'échappe republierait
             // le clair dans le salon.
             try {
-                if (!decrypted.has(messageId)) return;
+                if (!decrypted.has(messageId)) {
+                    // Message seulement marqué comme illisible : le 🔒 est un
+                    // ajout d'affichage, il ne doit pas être publié.
+                    if (unreadable.has(messageId)) msg.content = stripMarkers(msg.content);
+                    return;
+                }
                 msg.content = await encodeOutgoing({
-                    ...encodeSettings(), raw: stripLockPrefix(msg.content), context: channelId
+                    ...encodeSettings(), raw: stripMarkers(msg.content), context: channelId
                 });
             } catch (e) {
                 const why = e instanceof PapotageError ? e.message : String((e as any)?.message ?? e);
@@ -350,6 +380,7 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onLoad);
         seen.clear();
         decrypted.clear();
+        unreadable.clear();
         forgetKeys(); // ne pas laisser traîner les clés dérivées après un stop
     }
 });

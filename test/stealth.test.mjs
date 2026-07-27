@@ -9,44 +9,76 @@ import test from "node:test";
 
 import { PADDING, decodeCompact, decodeHidden, encodeCompact, encodeHidden, wireSize } from "../src/codec.mjs";
 import { pickCover, resetCoverHistory } from "../src/covers.mjs";
-import { CTX, PASS, incompressible, isSubsequence, longestInvisibleRun, visible } from "./helpers.mjs";
+import { CTX, PASS, ZW_SYMBOLS, incompressible, isSubsequence, longestInvisibleRun, visible } from "./helpers.mjs";
 
 // --- Signatures de format ---------------------------------------------------
 
-test("aucun marqueur fixe n'ouvre le payload", async () => {
-    // v2 démarrait le payload par un U+2060 constant : une signature publique,
-    // donc un détecteur à une ligne. Le premier symbole doit maintenant varier
-    // d'un message à l'autre (il dépend de la découpe aléatoire).
-    const premiers = new Set();
-    for (let i = 0; i < 40; i++) {
-        const msg = await encodeHidden("secret", PASS, { cover: "ok ça marche", context: CTX });
-        premiers.add([...msg][0]);
+test("le message commence toujours par du texte visible", async () => {
+    // Un message Discord ordinaire ne commence jamais par un caractère
+    // invisible. En v3 la dispersion en plaçait avant la couverture dans 90 %
+    // des cas (mesuré) : un détecteur d'une ligne, `/^[\u200B-\u2064]/`.
+    for (let i = 0; i < 60; i++) {
+        const msg = await encodeHidden("secret", PASS, { context: CTX });
+        assert.ok(!ZW_SYMBOLS.includes([...msg][0]),
+            `message ${i} commençant par un invisible : ${JSON.stringify(msg.slice(0, 8))}`);
     }
-    assert.ok(premiers.size > 1, "le message commence toujours par le même caractère");
+});
+
+test("aucun symbole constant n'ouvre le payload", async () => {
+    // Régression : jusqu'en v3 le payload débutait par un en-tête de densité
+    // constant, donc le premier caractère invisible de TOUT message valait
+    // ZW[1] en 3 bits — 400 fois sur 400. Le marqueur avait changé de place,
+    // pas disparu. Le premier symbole doit maintenant balayer tout l'alphabet.
+    const vus = new Set();
+    for (let i = 0; i < 200; i++) {
+        const msg = await encodeHidden("secret", PASS, { cover: "ok ça marche", context: CTX });
+        vus.add(ZW_SYMBOLS.indexOf([...msg].find(c => ZW_SYMBOLS.includes(c))));
+    }
+    // 8 valeurs équiprobables sur 200 tirages : en manquer 3 est hors d'atteinte
+    // (probabilité < 1e-9), le test n'est pas capricieux pour autant.
+    assert.ok(vus.size >= 6, `seulement ${vus.size} valeurs distinctes : ${[...vus].sort()}`);
 });
 
 test("le payload ne forme plus un bloc d'un seul tenant", async () => {
-    // La détection générique cherche une longue série contiguë de caractères
-    // de formatage. En v2 la série faisait toute la taille du payload.
+    // La détection générique cherche une longue série contiguë de caractères de
+    // formatage. En v2 la série faisait toute la taille du payload.
+    // Seuil fondé sur la mesure : moyenne 0,149, p99 0,280, maximum observé
+    // 0,356 sur 300 tirages. Assertion sur la MOYENNE d'un échantillon, qui se
+    // concentre — contrairement à un tirage unique, qui rendait le test flaky.
     const clair = incompressible(200);
-    const msg = await encodeHidden(clair, PASS, { cover: "ouais je te suis là-dessus", context: CTX });
-    const total = [...msg].length - visible(msg).length;
-    const run = longestInvisibleRun(msg);
-    assert.ok(run < total / 2, `série de ${run} sur ${total} symboles : trop groupé`);
+    const ratios = [];
+    for (let i = 0; i < 30; i++) {
+        const msg = await encodeHidden(clair, PASS, { cover: "ouais je te suis là-dessus", context: CTX });
+        const total = [...msg].length - visible(msg).length;
+        ratios.push(longestInvisibleRun(msg) / total);
+    }
+    const moyenne = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+    assert.ok(moyenne < 0.30, `série moyenne = ${(moyenne * 100).toFixed(1)} % du payload : trop groupé`);
 });
 
 test("le mode compact disperse aussi ses symboles", async () => {
-    const msg = await encodeCompact(incompressible(200), PASS, { cover: "ok je regarde ça", context: CTX });
-    const total = [...msg].length - visible(msg).length;
-    assert.ok(longestInvisibleRun(msg) < total / 2, "payload compact trop groupé");
+    const ratios = [];
+    for (let i = 0; i < 20; i++) {
+        const msg = await encodeCompact(incompressible(200), PASS, { cover: "ok je regarde ça", context: CTX });
+        const total = [...msg].length - visible(msg).length;
+        ratios.push(longestInvisibleRun(msg) / total);
+    }
+    const moyenne = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+    assert.ok(moyenne < 0.35, `payload compact groupé à ${(moyenne * 100).toFixed(1)} %`);
 });
 
 test("deux envois du même secret ne produisent pas la même découpe", async () => {
-    const a = await encodeHidden("toujours pareil", PASS, { cover: "ok", context: CTX });
-    const b = await encodeHidden("toujours pareil", PASS, { cover: "ok", context: CTX });
-    assert.notEqual(a, b);
-    assert.notEqual(longestInvisibleRun(a) + "|" + a.indexOf("​"),
-        longestInvisibleRun(b) + "|" + b.indexOf("​"));
+    // Mesuré : 40 envois donnent 40 textes distincts et 24 longueurs de série
+    // distinctes. Comparer deux messages sur une empreinte à deux valeurs, comme
+    // avant, pouvait coïncider — d'où un test capricieux.
+    const textes = new Set(), formes = new Set();
+    for (let i = 0; i < 40; i++) {
+        const msg = await encodeHidden("toujours pareil", PASS, { cover: "ok ça marche", context: CTX });
+        textes.add(msg);
+        formes.add(longestInvisibleRun(msg));
+    }
+    assert.equal(textes.size, 40, "deux envois identiques au caractère près");
+    assert.ok(formes.size >= 10, `seulement ${formes.size} découpes distinctes sur 40`);
 });
 
 // --- Intégrité visuelle de la couverture ------------------------------------
