@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { decodeHidden, encodeHidden } from "../src/codec.mjs";
-import { CTX, PASS, invisibleCount, len, visible } from "./helpers.mjs";
+import { COVER, CTX, PASS, invisibleCount, len, visible } from "./helpers.mjs";
 
 test("aller-retour, et la partie visible se limite à la couverture", async () => {
     const clair = "rdv 20h au parc, dis rien à personne";
@@ -15,12 +15,12 @@ test("aller-retour, et la partie visible se limite à la couverture", async () =
 
 test("accents et emojis dans le secret", async () => {
     const clair = "T'inquiète, j'ai géré 😏 rendez-vous à la crêperie";
-    const msg = await encodeHidden(clair, PASS, { context: CTX });
+    const msg = await encodeHidden(clair, PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeHidden(msg, PASS, { context: CTX }), clair);
 });
 
 test("mauvaise clé => null", async () => {
-    const msg = await encodeHidden("secret", PASS, { context: CTX });
+    const msg = await encodeHidden("secret", PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeHidden(msg, "faux", { context: CTX }), null);
 });
 

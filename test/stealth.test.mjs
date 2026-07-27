@@ -7,9 +7,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PADDING, decodeCompact, decodeHidden, encodeCompact, encodeHidden, wireSize } from "../src/codec.mjs";
+import { decodeCompact, decodeHidden, encodeCompact, encodeHidden } from "../src/codec.mjs";
+import { PADDING, wireSize } from "../src/envelope.mjs";
 import { pickCover, resetCoverHistory } from "../src/covers.mjs";
-import { CTX, PASS, ZW_SYMBOLS, incompressible, isSubsequence, longestInvisibleRun, visible } from "./helpers.mjs";
+import { encodeOutgoing } from "../src/plugin-core.mjs";
+import { COVER, CTX, PASS, ZW_SYMBOLS, incompressible, isSubsequence, longestInvisibleRun, visible } from "./helpers.mjs";
 
 // --- Signatures de format ---------------------------------------------------
 
@@ -18,7 +20,7 @@ test("le message commence toujours par du texte visible", async () => {
     // invisible. En v3 la dispersion en plaçait avant la couverture dans 90 %
     // des cas (mesuré) : un détecteur d'une ligne, `/^[\u200B-\u2064]/`.
     for (let i = 0; i < 60; i++) {
-        const msg = await encodeHidden("secret", PASS, { context: CTX });
+        const msg = await encodeHidden("secret", PASS, { cover: COVER, context: CTX });
         assert.ok(!ZW_SYMBOLS.includes([...msg][0]),
             `message ${i} commençant par un invisible : ${JSON.stringify(msg.slice(0, 8))}`);
     }
@@ -86,7 +88,7 @@ test("deux envois du même secret ne produisent pas la même découpe", async ()
 test("la partie visible reste exactement la couverture", async () => {
     // Disperser ne doit rien faire apparaître : c'est toute la promesse.
     for (const cover of ["ok", "ouais tranquille et toi ?", "bon bah nickel 🙌"]) {
-        const msg = await encodeHidden("secret", PASS, { cover, context: CTX });
+        const msg = await encodeHidden("secret", PASS, { cover: COVER, cover, context: CTX });
         assert.equal(visible(msg), cover, `couverture "${cover}"`);
     }
 });
@@ -98,7 +100,7 @@ test("le mode compact préserve les emojis composés de la couverture", async ()
     const seg = new Intl.Segmenter();
     const count = t => [...seg.segment(t)].length;
     for (const cover of ["bravo 🏳️‍🌈 voilà", "coucou 👨‍👩‍👧 ça va", "trop hâte ❤️ à toute"]) {
-        const msg = await encodeCompact("secret", PASS, { cover, context: CTX });
+        const msg = await encodeCompact("secret", PASS, { cover: COVER, cover, context: CTX });
         assert.ok(isSubsequence(cover, msg), `couverture amputée : "${cover}"`);
         assert.equal(count(msg), count(cover), `graphème coupé : "${cover}"`);
         assert.equal(await decodeCompact(msg, PASS, { context: CTX }), "secret");
@@ -107,7 +109,7 @@ test("le mode compact préserve les emojis composés de la couverture", async ()
 
 test("le mode invisible préserve les couvertures sans liant", async () => {
     for (const cover of ["trop hâte ❤️ à toute", "ok ça marche 👍", "bien vu ⚠️ attention"]) {
-        const msg = await encodeHidden("secret", PASS, { cover, context: CTX });
+        const msg = await encodeHidden("secret", PASS, { cover: COVER, cover, context: CTX });
         assert.ok(isSubsequence(cover, msg), `couverture amputée : "${cover}"`);
         assert.equal(await decodeHidden(msg, PASS, { context: CTX }), "secret");
     }
@@ -120,7 +122,7 @@ test("le mode invisible ampute les emojis à liant, et c'est documenté", async 
     // épinglé ici pour qu'il ne surprenne personne — la seule autre issue
     // possible serait de corrompre le payload.
     const cover = "coucou 👨\u200d👩\u200d👧 ça va";
-    const msg = await encodeHidden("secret", PASS, { cover, context: CTX });
+    const msg = await encodeHidden("secret", PASS, { cover: COVER, cover, context: CTX });
     // Comparer le texte VISIBLE, pas une sous-séquence : le payload dispersé
     // contient lui-même des liants, et l'un d'eux pourrait tomber entre deux
     // emojis et satisfaire la recherche par hasard. La règle est déterministe.
@@ -181,8 +183,11 @@ test("une liste perso remplace complètement le pool intégré", async () => {
     }
 });
 
-test("une liste perso est utilisée telle quelle par l'encodeur", async () => {
+test("une liste perso traverse la couche application jusqu'au message", async () => {
+    // Le codec ne connaît plus le pool : c'est `encodeOutgoing` qui choisit la
+    // phrase et la lui passe toute faite. Le test emprunte donc exactement le
+    // chemin du plugin, ce qui le rend plus fidèle qu'avant.
     const pool = ["mon message de couverture à moi"];
-    const msg = await encodeHidden("secret", PASS, { context: CTX, pool });
+    const msg = await encodeOutgoing({ raw: "secret", passphrase: PASS, context: CTX, pool });
     assert.equal(visible(msg), pool[0]);
 });

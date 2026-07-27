@@ -3,8 +3,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeHidden, encodeHidden, wireSize, wireSizeMax } from "../src/codec.mjs";
-import { CTX, PASS, incompressible, invisibleCount } from "./helpers.mjs";
+import { decodeHidden, encodeHidden } from "../src/codec.mjs";
+import { wireSize, wireSizeMax } from "../src/envelope.mjs";
+import { COVER, CTX, PASS, incompressible, invisibleCount } from "./helpers.mjs";
 
 // Message long et redondant, typique d'un vrai échange.
 const LONG = "on se retrouve demain à quatorze heures devant le lycée comme d'habitude, "
@@ -12,7 +13,7 @@ const LONG = "on se retrouve demain à quatorze heures devant le lycée comme d'
     + "n'oublie pas tes affaires et surtout dis rien à personne d'accord ?";
 
 test("aller-retour d'un long message compressible", async () => {
-    const msg = await encodeHidden(LONG, PASS, { context: CTX });
+    const msg = await encodeHidden(LONG, PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeHidden(msg, PASS, { context: CTX }), LONG);
 });
 
@@ -35,12 +36,12 @@ test("un texte peu compressible n'est jamais gonflé par la compression", async 
 });
 
 test("message court : aller-retour intact", async () => {
-    const msg = await encodeHidden("ok", PASS, { context: CTX });
+    const msg = await encodeHidden("ok", PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeHidden(msg, PASS, { context: CTX }), "ok");
 });
 
 test("mauvaise clé sur un message compressé => null", async () => {
-    const msg = await encodeHidden(LONG, PASS, { context: CTX });
+    const msg = await encodeHidden(LONG, PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeHidden(msg, "faux", { context: CTX }), null);
 });
 

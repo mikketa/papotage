@@ -4,11 +4,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { decodeCompact, decodeHidden, encodeCompact, encodeHidden } from "../src/codec.mjs";
-import { CTX, PASS, incompressible, invisibleCount, visible } from "./helpers.mjs";
+import { COVER, CTX, PASS, incompressible, invisibleCount, visible } from "./helpers.mjs";
 
 test("le texte visible est exactement la couverture", async () => {
     const cover = "ouais on se voit demain à 15h";
-    const msg = await encodeCompact("secret bien planqué", PASS, { cover, context: CTX });
+    const msg = await encodeCompact("secret bien planqué", PASS, { cover: COVER, cover, context: CTX });
     assert.equal(visible(msg), cover);
     assert.equal(await decodeCompact(msg, PASS, { context: CTX }), "secret bien planqué");
 });
@@ -27,12 +27,12 @@ test("couverture finissant par un emoji", async () => {
 
 test("emojis et accents dans le secret", async () => {
     const clair = "ramène les 🍕 et on lance le film 🎬 à 20h — crêperie sinon";
-    const msg = await encodeCompact(clair, PASS, { context: CTX });
+    const msg = await encodeCompact(clair, PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeCompact(msg, PASS, { context: CTX }), clair);
 });
 
 test("mauvaise clé => null", async () => {
-    const msg = await encodeCompact("secret", PASS, { context: CTX });
+    const msg = await encodeCompact("secret", PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeCompact(msg, "faux", { context: CTX }), null);
 });
 

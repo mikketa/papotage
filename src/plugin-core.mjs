@@ -5,15 +5,17 @@
 // câblage (boutons, événements Flux, toasts).
 
 import {
-    PADDING,
-    scanSymbols,
     decodeCompact, decodeEmoji, decodeHidden,
-    visibleText,
     encodeCompact, encodeEmoji, encodeHidden,
-    parseInput
+    scanSymbols,
+    visibleText
 } from "./codec.mjs";
+import { parseCoverPool, pickCover } from "./covers.mjs";
+import { PADDING, forgetKeys, warmKey } from "./envelope.mjs";
 
-export { PADDING };
+// Réexporté pour que le câblage Vencord n'ait qu'une seule couche en face de
+// lui : c'est la couche application qui expose ce dont l'interface a besoin.
+export { PADDING, forgetKeys, parseCoverPool, warmKey };
 
 export const MODE = {
     HIDDEN: "hidden",     // zero-width 3 bits/car (défaut)
@@ -39,6 +41,26 @@ export class PapotageError extends Error {
         this.name = "PapotageError";
         this.code = code;
     }
+}
+
+// Sépare une saisie « phrase visible | message secret ».
+//   - séparateur présent -> couverture écrite par l'humain, pour garder une
+//     conversation cohérente ;
+//   - absent -> tout est secret, la couverture est tirée au sort.
+// On coupe au PREMIER séparateur seulement : le secret peut en contenir.
+//
+// C'est de l'interprétation de saisie utilisateur, pas de l'encodage — d'où sa
+// place ici et non dans le codec.
+export function parseInput(raw, separator = DEFAULT_SEPARATOR) {
+    const at = separator ? raw.indexOf(separator) : -1;
+    if (at < 0) return { cover: null, secret: raw };
+    const cover = raw.slice(0, at).trim();
+    const secret = raw.slice(at + separator.length);
+    // Un des deux côtés vide (espaces compris) => la saisie n'est pas un vrai
+    // couple couverture/secret : on chiffre tout, plutôt que de publier la
+    // moitié gauche en clair en croyant que c'est une couverture voulue.
+    if (!cover || !secret.trim()) return { cover: null, secret: raw };
+    return { cover, secret };
 }
 
 // ===========================================================================
@@ -71,9 +93,9 @@ export async function encodeOutgoing({
         throw new PapotageError("empty-secret",
             "Papotage : rien à chiffrer après le séparateur. Message NON envoyé.");
     }
-    const chosenCover = cover ?? (defaultCover.trim() || undefined);
-
-    const opts = { cover: chosenCover, context, padding, pool };
+    // Le choix de la phrase affichée se fait ICI : c'est une décision de
+    // produit. Le codec la reçoit toute faite et n'a pas à connaître le pool.
+    const opts = { cover: pickCover(cover ?? defaultCover, { pool }), context, padding };
     let content;
     try {
         switch (mode) {

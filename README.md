@@ -113,11 +113,12 @@ npm run audit   # cherche les régularités exploitables dans les messages produ
 npm run bench   # mesures de performance
 ```
 
-110 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
+116 tests couvrent l'aller-retour des trois encodages, la séparation des clés par
 salon, le padding, l'authentification, le rejet d'entrées hostiles (fuzzing), les
 règles d'envoi du plugin, les propriétés de discrétion (absence de marqueur fixe,
 dispersion du payload, intégrité des emojis de couverture, variété des phrases) et la
-détection d'un message altéré par Discord.
+détection d'un message altéré par Discord et le respect de la règle de dépendance
+entre modules.
 
 Les tests qui portent sur des grandeurs aléatoires (dispersion, variété des
 couvertures) affirment des statistiques d'échantillon avec des seuils tirés de
@@ -136,12 +137,25 @@ CI compile `index.tsx` avec esbuild à chaque changement.
 
 ## Structure
 
-- `src/codec.mjs` — chiffrement AES-GCM, encodages (invisible, compact, emoji) et dispersion
+Les dépendances pointent vers l'intérieur : `index.tsx` est le seul fichier qui
+connaisse Discord, et il ne parle qu'à la couche application.
+
+```
+index.tsx          câblage Vencord (bouton, événements, toasts)
+  └─ plugin-core   règles d'envoi et de réception — aucune dépendance Vencord
+       ├─ codec    encodages : octets <-> caractères invisibles, dispersion
+       │    └─ envelope   chiffrement AES-GCM, dérivation de clé, remplissage
+       ├─ covers   génération des phrases de couverture
+       └─ envelope
+```
+
+- `src/envelope.mjs` — la partie sensible, isolée pour être relisible seule (224 lignes)
+- `src/codec.mjs` — encodages et dispersion ; ne chiffre rien, ne choisit pas la couverture
 - `src/covers.mjs` — génération des phrases de couverture
 - `src/random.mjs` — tirage aléatoire uniforme partagé
 - `src/plugin-core.mjs` — règles d'envoi et de réception, sans dépendance Vencord
-- `src/index.tsx` — câblage Vencord (bouton, événements, toasts)
-- `test/` — suite de tests (`node:test`)
+- `src/index.tsx` — câblage Vencord
+- `test/` — suite de tests (`node:test`), dont `architecture.test.mjs` qui applique la règle ci-dessus
 - `bench/` — mesures de performance et audit stéganographique
 
 ## Licence

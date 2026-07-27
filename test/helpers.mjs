@@ -1,6 +1,7 @@
 // Outils partagés par les suites de test.
 
 export const PASS = "motdepasse-secret";
+export const COVER = "ouais je te suis là-dessus"; // couverture fixe pour les tests
 export const CTX = "123456789012345678";      // identifiant de salon fictif
 export const OTHER_CTX = "987654321098765432";
 

@@ -15,7 +15,7 @@
 //   4. un ensemble restreint de valeurs possibles (longueurs quantifiées).
 
 import { encodeCompact, encodeHidden } from "../src/codec.mjs";
-import { CTX, PASS, ZW_SYMBOLS } from "../test/helpers.mjs";
+import { COVER, CTX, PASS, ZW_SYMBOLS } from "../test/helpers.mjs";
 
 const N = 600;
 const VS = /[\u{FE00}-\u{FE0F}]|[\u{E0100}-\u{E01EF}]/u;
@@ -101,13 +101,13 @@ const estVS = c => c !== undefined && VS.test(c);
 console.log("Audit stéganographique — chaque ALERTE est une régularité exploitable.");
 
 analyse("mode invisible dense (3 bits)",
-    await echantillon(s => encodeHidden(s, PASS, { context: CTX }), "rendez-vous à 20h"), estZW);
+    await echantillon(s => encodeHidden(s, PASS, { cover: COVER, context: CTX }), "rendez-vous à 20h"), estZW);
 
 analyse("mode invisible sûr (2 bits)",
-    await echantillon(s => encodeHidden(s, PASS, { bits: 2, context: CTX }), "rendez-vous à 20h"), estZW);
+    await echantillon(s => encodeHidden(s, PASS, { cover: COVER, bits: 2, context: CTX }), "rendez-vous à 20h"), estZW);
 
 analyse("mode compact (sélecteurs de variation)",
-    await echantillon(s => encodeCompact(s, PASS, { context: CTX }), "rendez-vous à 20h"), estVS);
+    await echantillon(s => encodeCompact(s, PASS, { cover: COVER, context: CTX }), "rendez-vous à 20h"), estVS);
 
 console.log(`\n${alertes.length === 0 ? "Aucune régularité détectée." : `${alertes.length} régularité(s) exploitable(s) :`}`);
 for (const a of alertes) console.log(`  - ${a}`);

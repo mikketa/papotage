@@ -5,8 +5,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { encodeCompact, decodeCompact, wireSize, wireSizeMax } from "../src/codec.mjs";
-import { CTX, OTHER_CTX, PASS, incompressible, invisibleCount } from "./helpers.mjs";
+import { decodeCompact, encodeCompact } from "../src/codec.mjs";
+import { wireSize, wireSizeMax } from "../src/envelope.mjs";
+import { COVER, CTX, OTHER_CTX, PASS, incompressible, invisibleCount } from "./helpers.mjs";
 
 // Octets réellement envoyés pour un secret donné. Le mode compact code un octet
 // par caractère invisible, et sa trame n'a plus d'octet de repère depuis la v4.
@@ -17,18 +18,18 @@ async function wireBytes(text, ctx = CTX) {
 
 test("aller-retour simple", async () => {
     const clair = "rdv 20h au parc, dis rien à personne";
-    const msg = await encodeCompact(clair, PASS, { context: CTX });
+    const msg = await encodeCompact(clair, PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeCompact(msg, PASS, { context: CTX }), clair);
 });
 
 test("mauvaise clé => null", async () => {
-    const msg = await encodeCompact("secret", PASS, { context: CTX });
+    const msg = await encodeCompact("secret", PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeCompact(msg, "faux", { context: CTX }), null);
 });
 
 test("un salon ne déchiffre pas les messages d'un autre salon", async () => {
     // Le sel PBKDF2 dépend du contexte : même mot de passe, clé différente.
-    const msg = await encodeCompact("le colis est sous l'escalier", PASS, { context: CTX });
+    const msg = await encodeCompact("le colis est sous l'escalier", PASS, { cover: COVER, context: CTX });
     assert.equal(await decodeCompact(msg, PASS, { context: OTHER_CTX }), null);
     assert.equal(await decodeCompact(msg, PASS, { context: "" }), null);
 });

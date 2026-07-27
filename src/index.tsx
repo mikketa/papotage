@@ -3,8 +3,10 @@
  * Chiffre les messages et cache le résultat : l'outsider voit une phrase banale
  * (ou des emojis), toi (avec le plugin + la clé) tu vois le vrai texte à la place.
  *
- * Ce fichier ne fait que du câblage Vencord. Toute la logique testable est dans
- * `plugin-core.mjs` et `codec.mjs`.
+ * Ce fichier ne fait que du câblage Vencord, et c'est le SEUL qui connaisse
+ * Discord. Toute la logique vit derrière `plugin-core.mjs`, qui expose ce dont
+ * l'interface a besoin — d'où l'unique import local ci-dessous.
+ * `test/architecture.test.mjs` vérifie cette règle à chaque exécution.
  */
 
 import { addChatBarButton, ChatBarButton, ChatBarButtonFactory, removeChatBarButton } from "@api/ChatButtons";
@@ -19,8 +21,6 @@ import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
 import { FluxDispatcher, MessageStore, SelectedChannelStore, Toasts, UserStore, useState } from "@webpack/common";
 
-import { forgetKeys, warmKey } from "./codec.mjs";
-import { parseCoverPool } from "./covers.mjs";
 import {
     decodeIncoming,
     encodeOutgoing,
@@ -31,7 +31,10 @@ import {
     PapotageError,
     SeenCache,
     SendLedger,
-    stripMarkers
+    forgetKeys,
+    parseCoverPool,
+    stripMarkers,
+    warmKey
 } from "./plugin-core.mjs";
 
 const settings = definePluginSettings({

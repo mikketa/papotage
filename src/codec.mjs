@@ -1,250 +1,30 @@
-// Papotage — chiffre un texte puis le cache dans un message d'apparence banale.
-// Fonctionne dans Node (>=20) et dans le navigateur : utilise globalThis.crypto.
+// Encodages de Papotage : transforme des octets scellés en caractères que
+// Discord transporte sans les afficher, et l'inverse.
 //
-// ===========================================================================
-// Format v4 (incompatible avec les versions antérieures : la séparation est
-// assurée par le domaine de dérivation, un message d'une autre version se
-// décode en null).
-// ===========================================================================
+// Ce module ne chiffre rien — voir `envelope.mjs` — et ne choisit pas ce que dit
+// la phrase de couverture : elle lui est fournie. Il ne connaît que des octets,
+// des graphèmes et trois alphabets.
 //
-//   clair ──▶ [flags(1)] ──▶ deflate? ──▶ padding ──▶ AES-GCM ──▶ octets
-//                                                                   │
-//                          ┌────────────────────────────────────────┘
-//                          ▼
-//   octets = nonce(12 o) || ciphertext || tag(16 o)
-//
-// Chiffrement (inchangé depuis v2) : nonce de 12 octets aléatoires, tag GCM
-// complet de 128 bits, sel PBKDF2 dérivé du salon, drapeau de compression
-// placé DANS le clair chiffré pour ne pas fuiter la compressibilité.
-//
-// Ce que v3 et v4 ont changé, côté DISSIMULATION :
-//   - plus de marqueur fixe. v2 annonçait le payload par un U+2060 : une
-//     constante publique, donc la signature parfaite pour un détecteur ("le
-//     premier word-joiner suivi de caractères invisibles"). Le décodeur
-//     ramasse désormais les symboles de son alphabet où qu'ils soient.
-//   - payload dispersé dans la couverture au lieu d'un bloc collé à la fin.
-//     v2 produisait une traînée de plusieurs centaines de caractères
-//     invisibles d'un seul tenant : c'est ce que cherchent les expressions
-//     régulières de détection.
-//   - padding par paliers en option, pour que la longueur du message ne suive
-//     plus la longueur du secret.
-//   - plus d'en-tête de densité (v4). v3 le plaçait en premier symbole du
-//     payload : c'était une constante, donc le premier caractère invisible de
-//     tout message valait ZW[1] en 3 bits et ZW[0] en 2 bits — mesuré 400 fois
-//     sur 400. Le marqueur avait changé de place, pas disparu. La densité se
-//     déduit maintenant des symboles eux-mêmes.
-//   - le message commence toujours par du texte visible (v4). En v3 la
-//     dispersion pouvait poser des symboles avant le premier caractère de la
-//     couverture, et le faisait dans 90 % des cas (mesuré) : un message Discord
-//     ordinaire ne commence jamais par un caractère invisible.
+// Ce que les versions successives ont changé, côté DISSIMULATION :
+//   - plus de marqueur fixe (v3). v2 annonçait le payload par un U+2060 : une
+//     constante publique, donc la signature parfaite pour un détecteur. Le
+//     décodeur ramasse désormais les symboles de son alphabet où qu'ils soient.
+//   - payload dispersé dans la couverture au lieu d'un bloc collé à la fin (v3).
+//   - plus d'en-tête de densité (v4) : c'était une constante en tête de payload,
+//     donc le premier caractère invisible de tout message valait toujours la même
+//     valeur, mesuré 400 fois sur 400. La densité se déduit des symboles.
+//   - plus d'octet de repère en mode compact (v4), pour la même raison. Le
+//     décalage se calcule au lieu de se chercher.
+//   - le payload ne touche ni le début ni la fin du message (v4) : un message
+//     Discord ordinaire ne commence ni ne finit par un caractère invisible.
 //
 // À dire clairement : rien de tout cela ne rend le canal indétectable. Un
 // scanner qui COMPTE les caractères invisibles d'un message les trouvera
-// toujours. Ce qui change, c'est qu'il faut le faire exprès : les heuristiques
-// génériques (traînée de caractères de formatage, marqueur connu) ne suffisent
-// plus.
+// toujours. Ce qui change, c'est qu'il faut le faire exprès. `npm run audit`
+// vérifie sur 600 messages par mode qu'aucune régularité facile n'est revenue.
 
-import { pickCover } from "./covers.mjs";
+import { FRAME_HEAD, PAD_BLOCK, plausibleFrame, seal, unseal } from "./envelope.mjs";
 import { randomInts } from "./random.mjs";
-
-const ENC = new TextEncoder();
-const DEC = new TextDecoder();
-
-const DOMAIN = "papotage-v4";  // sépare les versions de protocole ET les contextes
-const ITER = 600_000;          // PBKDF2 aligné OWASP ; coût amorti par le cache de clé
-const NONCE_LEN = 12;          // = taille d'IV native de GCM, aucun remplissage
-const TAG_BITS = 128;          // tag complet : pas de troncature, pas de limite d'invocations
-const PAD_BLOCK = 16;          // quantum de padding par défaut
-const FLAG_ZIPPED = 0x01;
-
-// Paliers du mode « longueur masquée ». Coûteux en place, mais la taille du
-// message ne dit alors plus que « quelque part entre deux paliers ».
-const BUCKETS = [64, 128, 256, 512, 1024, 1536, 2048];
-export const PADDING = { BLOCK: "bloc", BUCKET: "palier" };
-
-// --- Compression (deflate-raw) ----------------------------------------------
-// Chaque octet économisé = 1 à 4 caractères invisibles en moins. Format "raw"
-// (sans en-tête zlib) pour ne rien gaspiller. Appliquée seulement si elle réduit
-// vraiment la taille ; le drapeau voyage dans l'en-tête chiffré.
-const HAS_COMPRESSION = typeof CompressionStream === "function"
-    && typeof DecompressionStream === "function";
-
-// Mesuré : deflate-raw ne devient gagnant qu'à partir d'une trentaine d'octets
-// (16 octets en donnent 18, 32 en donnent 31). En dessous, c'est du calcul pur
-// perdu — le résultat serait de toute façon écarté.
-const MIN_DEFLATE = 32;
-
-async function pipeThrough(stream, bytes) {
-    const writer = stream.writable.getWriter();
-    writer.write(bytes);
-    writer.close();
-    const reader = stream.readable.getReader();
-    const chunks = [];
-    let total = 0;
-    for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        total += value.length;
-    }
-    const out = new Uint8Array(total);
-    let off = 0;
-    for (const c of chunks) { out.set(c, off); off += c.length; }
-    return out;
-}
-const deflate = bytes => pipeThrough(new CompressionStream("deflate-raw"), bytes);
-const inflate = bytes => pipeThrough(new DecompressionStream("deflate-raw"), bytes);
-
-// --- Padding ISO/IEC 7816-4 -------------------------------------------------
-// Un octet 0x80 puis des 0x00 jusqu'à la cible. Toujours au moins un octet
-// ajouté, donc le dépaddage est non ambigu quelle que soit la cible.
-function targetLength(n, mode) {
-    if (mode === PADDING.BUCKET) {
-        for (const b of BUCKETS) if (n < b) return b;
-        return Math.ceil((n + 1) / 512) * 512;
-    }
-    return (Math.floor(n / PAD_BLOCK) + 1) * PAD_BLOCK;
-}
-
-// Blocs de remplissage supplémentaires tirés au hasard. Sans eux, un secret
-// donné produit toujours exactement la même taille de message : deux envois du
-// même texte se reconnaissent à la longueur, et la longueur envoyée détermine
-// celle du clair à 16 octets près. Le mode paliers, lui, brouille déjà bien
-// plus largement — y ajouter du bruit ne ferait que casser ses paliers.
-const JITTER_BLOCKS = 3;
-
-function pad(bytes, mode) {
-    const jitter = mode === PADDING.BUCKET ? 0 : randomInts(1, JITTER_BLOCKS)[0] * PAD_BLOCK;
-    const out = new Uint8Array(targetLength(bytes.length, mode) + jitter);
-    out.set(bytes, 0);
-    out[bytes.length] = 0x80;
-    return out;
-}
-
-function unpad(bytes) {
-    for (let i = bytes.length - 1; i >= 0; i--) {
-        if (bytes[i] === 0x00) continue;
-        if (bytes[i] === 0x80) return bytes.subarray(0, i);
-        break;
-    }
-    throw new Error("padding invalide"); // fail-closed : l'appelant renverra null
-}
-
-// --- Dérivation de clé (PBKDF2 -> AES-GCM 256) ------------------------------
-// Le sel dépend du `context` (en pratique : l'identifiant du salon). Deux effets :
-//   - pas de sel constant partagé par tous les utilisateurs du plugin, donc pas
-//     de précalculation unique qui casserait tout le monde d'un coup ;
-//   - un même mot de passe donne une clé différente par conversation, donc la
-//     compromission d'un salon ne déchiffre pas les autres.
-// PBKDF2 600k coûte ~300 ms : on met la clé en cache (sel déterministe pour un
-// contexte donné), sinon déchiffrer un salon dériverait la clé à chaque message.
-// Borné : une dérivation coûte ~104 ms de CPU (mesuré) et retient une clé en
-// mémoire. Sans limite, parcourir cent salons en dérivait cent et les gardait
-// toutes jusqu'au rechargement de Discord.
-const KEY_CACHE_MAX = 16;
-const keyCache = new Map(); // `${context}\0${passphrase}` -> Promise<CryptoKey>
-
-async function saltFor(context) {
-    return new Uint8Array(await crypto.subtle.digest("SHA-256", ENC.encode(`${DOMAIN}|${context}`)));
-}
-
-function deriveKey(passphrase, context = "") {
-    const cacheKey = `${context}\u0000${passphrase}`;
-    const cached = keyCache.get(cacheKey);
-    if (cached) {
-        keyCache.delete(cacheKey); // réinsertion = remise en tête (Map = ordre d'insertion)
-        keyCache.set(cacheKey, cached);
-        return cached;
-    }
-    const key = (async () => {
-        const base = await crypto.subtle.importKey(
-            "raw", ENC.encode(passphrase), "PBKDF2", false, ["deriveKey"]
-        );
-        return crypto.subtle.deriveKey(
-            { name: "PBKDF2", salt: await saltFor(context), iterations: ITER, hash: "SHA-256" },
-            base,
-            { name: "AES-GCM", length: 256 },
-            false,
-            ["encrypt", "decrypt"]
-        );
-    })();
-    key.catch(() => keyCache.delete(cacheKey)); // ne pas garder un échec en cache
-    if (keyCache.size >= KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
-    keyCache.set(cacheKey, key);
-    return key;
-}
-
-// Pré-dérive la clé pour que le 1er déchiffrement du salon soit instantané.
-export function warmKey(passphrase, context = "") {
-    if (passphrase) void deriveKey(passphrase, context);
-}
-
-// Oublie les clés dérivées (changement de mot de passe, verrouillage).
-export function forgetKeys() {
-    keyCache.clear();
-}
-
-// --- Chiffrement : texte -> octets (nonce || ciphertext+tag) ----------------
-async function encryptBytes(text, passphrase, context = "", padding = PADDING.BLOCK) {
-    const key = await deriveKey(passphrase, context);
-    const raw = ENC.encode(text);
-
-    let body = raw, flags = 0;
-    if (HAS_COMPRESSION && raw.length >= MIN_DEFLATE) {
-        const packed = await deflate(raw);
-        if (packed.length < raw.length) { body = packed; flags |= FLAG_ZIPPED; }
-    }
-
-    const inner = new Uint8Array(1 + body.length);
-    inner[0] = flags;                 // en-tête chiffré : aucun oracle en clair
-    inner.set(body, 1);
-
-    const nonce = crypto.getRandomValues(new Uint8Array(NONCE_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv: nonce, tagLength: TAG_BITS }, key, pad(inner, padding)
-    ));
-
-    const out = new Uint8Array(nonce.length + ct.length);
-    out.set(nonce, 0);
-    out.set(ct, nonce.length);
-    return out;
-}
-
-// Lève si le tag est invalide (mauvaise clé, mauvais contexte, message étranger).
-async function decryptBytes(bytes, passphrase, context = "") {
-    if (bytes.length <= NONCE_LEN) throw new Error("trame trop courte");
-    const key = await deriveKey(passphrase, context);
-    const padded = new Uint8Array(await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: bytes.subarray(0, NONCE_LEN), tagLength: TAG_BITS },
-        key,
-        bytes.subarray(NONCE_LEN)
-    ));
-    const inner = unpad(padded);
-    if (inner.length < 1) throw new Error("trame vide");
-    const body = inner.subarray(1);
-    if ((inner[0] & FLAG_ZIPPED) === 0) return DEC.decode(body);
-    return DEC.decode(await inflate(body));
-}
-
-// La trame fait nonce(12) + ciphertext + tag(16), et GCM ne change pas la
-// taille : le ciphertext vaut exactement le clair rembourré, donc un multiple de
-// PAD_BLOCK. Toute longueur qui ne respecte pas ça ne peut pas être une trame
-// Papotage — on l'écarte sans lancer le moindre déchiffrement.
-function plausibleFrame(len) {
-    const head = NONCE_LEN + TAG_BITS / 8;
-    return len >= head + PAD_BLOCK && (len - head) % PAD_BLOCK === 0;
-}
-
-// Nombre MINIMAL d'octets envoyés pour un secret de `n` octets utiles. La taille
-// réelle y ajoute 0 à 2 blocs de remplissage tirés au hasard (mode blocs).
-export function wireSize(n, padding = PADDING.BLOCK) {
-    return NONCE_LEN + TAG_BITS / 8 + targetLength(n + 1, padding);
-}
-
-// Nombre maximal, jitter compris.
-export function wireSizeMax(n, padding = PADDING.BLOCK) {
-    return wireSize(n, padding) + (padding === PADDING.BUCKET ? 0 : (JITTER_BLOCKS - 1) * PAD_BLOCK);
-}
 
 // ===========================================================================
 // Dispersion
@@ -309,6 +89,16 @@ function scatter(cover, symbols, { fromGrapheme = 0 } = {}) {
     return out;
 }
 
+// La couverture est fournie par l'appelant : choisir ce qu'elle dit est une
+// décision de produit, pas d'encodage. Le codec exige seulement qu'elle existe
+// et qu'elle ait de quoi accueillir des symboles entre deux caractères.
+function requireCover(cover) {
+    if (typeof cover !== "string" || cover.length === 0) {
+        throw new TypeError("Papotage : une phrase de couverture est requise pour encoder.");
+    }
+    return cover;
+}
+
 // ===========================================================================
 // Mode invisible (zero-width) — le mode par défaut.
 // ===========================================================================
@@ -317,8 +107,9 @@ function scatter(cover, symbols, { fromGrapheme = 0 } = {}) {
 // - index 0-3 : sûrs, préservés par Discord (ZWSP, ZWNJ, ZWJ, word-joiner).
 // - index 4-7 : opérateurs invisibles (même famille Cf que le word-joiner), très
 //   probablement préservés -> activés par la densité 3 bits.
-// Le PREMIER symbole rencontré code la densité (0 => 2 bits, 1 => 3 bits) : le
-// récepteur s'adapte seul, rien à régler de son côté.
+// Aucun en-tête n'annonce la densité : ce serait une constante en tête de
+// payload. Elle se déduit — un symbole >= 4 ne peut venir que de l'alphabet
+// 3 bits — donc le récepteur s'adapte seul, sans rien qui le trahisse.
 const ZW_ALL = ["​", "‌", "‍", "⁠", "⁡", "⁢", "⁣", "⁤"];
 const ZW_VAL = new Map(ZW_ALL.map((c, i) => [c, i]));
 
@@ -349,9 +140,9 @@ function stripHidden(s) {
 
 // Indice du premier graphème après lequel on peut poser le payload compact :
 // juste derrière le dernier graphème de la couverture qui porte déjà un
-// sélecteur de variation. Les sélecteurs de « ❤️ » ou « 🏳️‍🌈 » se retrouvent ainsi
-// tous AVANT le MAGIC, donc ignorés par le décodeur — la couverture garde son
-// rendu exact au lieu d'être amputée.
+// sélecteur de variation. Ceux de « ❤️ » ou « 🏳️‍🌈 » se retrouvent ainsi tous avant
+// la trame, donc absorbés par le décalage calculé au décodage — la couverture
+// garde son rendu exact au lieu d'être amputée.
 function firstCompactSlot(cover) {
     const gs = graphemes(cover);
     let idx = 0;
@@ -435,15 +226,11 @@ export function countCompactSymbols(message) {
     return scanSymbols(message).compact;
 }
 
-function coverFor(cover, pool) {
-    return pickCover(cover, { pool });
-}
-
 // `bits` = 2 (sûr, 4 symboles) ou 3 (dense, 8 symboles). Le flux d'octets est
 // ré-empaqueté en groupes de `bits` bits (pas d'alignement octet requis).
-export async function encodeHidden(text, passphrase, { cover, bits = 3, context = "", padding, pool } = {}) {
+export async function encodeHidden(text, passphrase, { cover, bits = 3, context = "", padding } = {}) {
     if (bits !== 2 && bits !== 3) bits = 3;
-    const bytes = await encryptBytes(text, passphrase, context, padding);
+    const bytes = await seal(text, passphrase, context, padding);
     const mask = (1 << bits) - 1;
     const syms = []; // aucun en-tête : ce serait une constante en tête de payload
     let acc = 0, accBits = 0;
@@ -460,7 +247,7 @@ export async function encodeHidden(text, passphrase, { cover, bits = 3, context 
     // caractère invisible (mesuré), ce qu'un message Discord ordinaire ne fait
     // jamais. C'est le même défaut que l'en-tête de densité — une régularité
     // qui suffit à trier, sans rien décoder.
-    return scatter(stripHidden(coverFor(cover, pool)), syms, { allowLeading: false });
+    return scatter(stripHidden(requireCover(cover)), syms, { allowLeading: false });
 }
 
 // Dépaquette un flux de symboles en octets pour une densité donnée.
@@ -512,7 +299,7 @@ export async function decodeHidden(message, passphrase, { context = "" } = {}) {
         const bytes = unpackBits(syms, bits);
         if (!bytes || !plausibleFrame(bytes.length)) continue;
         try {
-            return await decryptBytes(bytes, passphrase, context);
+            return await unseal(bytes, passphrase, context);
         } catch { /* densité suivante */ }
     }
     return null;
@@ -535,11 +322,11 @@ const ATTEMPT_CAP = 32;    // borne le travail sur une entrée hostile
 // 100 % sur 600 messages : exactement le défaut de l'ancien en-tête de densité.
 const MAX_SKEW = 8;
 
-export async function encodeCompact(text, passphrase, { cover, context = "", padding, pool } = {}) {
-    const body = await encryptBytes(text, passphrase, context, padding);
+export async function encodeCompact(text, passphrase, { cover, context = "", padding } = {}) {
+    const body = await seal(text, passphrase, context, padding);
     const syms = [];
     for (const b of body) syms.push(String.fromCodePoint(byteToVS(b)));
-    const base = coverFor(cover, pool) || "ok";
+    const base = requireCover(cover);
     return scatter(base, syms, { allowLeading: false, fromGrapheme: firstCompactSlot(base) });
 }
 
@@ -560,11 +347,10 @@ export async function decodeCompact(message, passphrase, { context = "" } = {}) 
             if (cp >= 0xe0100 && cp <= 0xe01ef) { bytes.push(cp - 0xe0100 + 16); i++; }
         }
     }
-    const head = NONCE_LEN + TAG_BITS / 8;
-    const skew = ((bytes.length - head) % PAD_BLOCK + PAD_BLOCK) % PAD_BLOCK;
+    const skew = ((bytes.length - FRAME_HEAD) % PAD_BLOCK + PAD_BLOCK) % PAD_BLOCK;
     if (skew > MAX_SKEW || !plausibleFrame(bytes.length - skew)) return null;
     try {
-        return await decryptBytes(new Uint8Array(bytes.slice(skew)), passphrase, context);
+        return await unseal(new Uint8Array(bytes.slice(skew)), passphrase, context);
     } catch {
         return null;
     }
@@ -580,8 +366,10 @@ export async function decodeCompact(message, passphrase, { context = "" } = {}) 
 // façon visible, la discrétion n'est pas son argument.
 const EMOJI_MAGIC = 0xc7;
 
+// La couverture est facultative ici, et n'est qu'un préfixe : la traînée
+// d'emojis est déjà visible, aucune phrase ne la dissimule.
 export async function encodeEmoji(text, passphrase, { cover, context = "", padding } = {}) {
-    const body = await encryptBytes(text, passphrase, context, padding);
+    const body = await seal(text, passphrase, context, padding);
     let seq = EMOJI[EMOJI_MAGIC >> 4] + EMOJI[EMOJI_MAGIC & 0x0f];
     for (const b of body) seq += EMOJI[b >> 4] + EMOJI[b & 0x0f];
     // La couverture est optionnelle ici : la traînée d'emojis est déjà le message.
@@ -604,28 +392,9 @@ export async function decodeEmoji(message, passphrase, { context = "" } = {}) {
         for (let s = bytes.indexOf(EMOJI_MAGIC); s >= 0; s = bytes.indexOf(EMOJI_MAGIC, s + 1)) {
             if (++tries > ATTEMPT_CAP) return null;
             try {
-                return await decryptBytes(new Uint8Array(bytes.slice(s + 1)), passphrase, context);
+                return await unseal(new Uint8Array(bytes.slice(s + 1)), passphrase, context);
             } catch { /* MAGIC suivant / autre alignement */ }
         }
     }
     return null;
-}
-
-// ===========================================================================
-// Saisie
-// ===========================================================================
-// Sépare une saisie "phrase visible | message secret".
-// - séparateur présent -> couverture écrite par l'humain (conversation cohérente)
-// - absent -> tout est secret, couverture auto
-// On coupe au PREMIER séparateur seulement (le secret peut en contenir).
-export function parseInput(raw, separator = " | ") {
-    const at = separator ? raw.indexOf(separator) : -1;
-    if (at < 0) return { cover: null, secret: raw };
-    const cover = raw.slice(0, at).trim();
-    const secret = raw.slice(at + separator.length);
-    // Un des deux côtés vide (y compris seulement des espaces) => la saisie n'est
-    // pas un vrai "couverture | secret" : on chiffre tout, plutôt que de publier
-    // la moitié gauche en clair en croyant que c'est une couverture voulue.
-    if (!cover || !secret.trim()) return { cover: null, secret: raw };
-    return { cover, secret };
 }

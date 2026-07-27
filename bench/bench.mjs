@@ -3,7 +3,7 @@
 // Sert à décider quoi optimiser sur des chiffres, et à vérifier après coup que
 // l'optimisation en était une.
 
-import { encodeHidden, decodeHidden } from "../src/codec.mjs";
+import { decodeHidden, encodeHidden } from "../src/codec.mjs";
 import { decodeIncoming, detectMode, encodeOutgoing } from "../src/plugin-core.mjs";
 import { CTX, PASS, incompressible } from "../test/helpers.mjs";
 
